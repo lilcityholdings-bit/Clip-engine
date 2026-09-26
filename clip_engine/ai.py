@@ -7,6 +7,9 @@ MODEL = "claude-opus-5"
 # Re-run a declined request on Anthropic's recommended fallback model.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
+# Clips Claude scores below this are never posted: weak clips drag down the whole channel.
+MIN_CLIP_SCORE = 6
+
 EVERGREEN_TOPICS = [
     "space", "history", "science", "technology", "psychology",
     "nature documentary", "economics", "lecture", "interview", "health",
@@ -95,9 +98,11 @@ def pick_clips(
                         "title": {"type": "string"},
                         "description": {"type": "string"},
                         "tags": {"type": "array", "items": {"type": "string"}},
+                        "hook_text": {"type": "string"},
+                        "score": {"type": "integer"},
                         "why": {"type": "string"},
                     },
-                    "required": ["start", "end", "title", "description", "tags", "why"],
+                    "required": ["start", "end", "title", "description", "tags", "hook_text", "score", "why"],
                     "additionalProperties": False,
                 },
             }
@@ -116,7 +121,12 @@ def pick_clips(
         f"Title style: {TITLE_STYLE_GUIDE[title_style]} Keep titles under 70 characters, "
         "accurate to what's said, with no ALL CAPS words or emoji spam. "
         "Description: 1-2 sentences about the clip (attribution is added separately). "
-        "Tags: 5-10 search terms."
+        "Tags: 5-10 search terms. "
+        "hook_text: 2-6 words shown on screen for the first 3 seconds to stop the scroll "
+        "(a tease of the payoff, not the title repeated). "
+        "score: 1-10, how likely a stranger scrolling past watches this to the end and "
+        "shares it. Be harsh: 5 is an average clip, 8+ is rare. Only return moments that "
+        "are genuinely strong; returning fewer clips is better than weak ones."
     )
     if rules:
         prompt += f"\n\nThe creator's rules for clips (must follow): {rules}"
@@ -124,8 +134,9 @@ def pick_clips(
     valid = []
     for c in clips:
         length = c["end"] - c["start"]
-        if min_sec - 3 <= length <= max_sec + 3 and c["start"] >= 0:
+        if min_sec - 3 <= length <= max_sec + 3 and c["start"] >= 0 and c["score"] >= MIN_CLIP_SCORE:
             if fmt == "short":
                 c["end"] = min(c["end"], c["start"] + 59)
             valid.append(c)
+    valid.sort(key=lambda c: c["score"], reverse=True)
     return valid[:count]

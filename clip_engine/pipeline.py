@@ -174,7 +174,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
         for i, clip in enumerate(clips):
             out = media.render(
                 video, work / f"clip{i}.mp4", clip["start"], clip["end"], arms["format"],
-                media.captions_ass(words, clip["start"], clip["end"], arms["format"]),
+                media.captions_ass(words, clip["start"], clip["end"], arms["format"], clip.get("hook_text", "")),
             )
             description = f"{clip['description']}\n\n{job.footer}"
             video_id = yt.upload(out, clip["title"], description, clip["tags"])
@@ -238,6 +238,18 @@ def pending_submissions(conn: sqlite3.Connection) -> list[dict]:
         " WHERE campaign_id IS NOT NULL AND submitted_at IS NULL ORDER BY campaign_id, uploaded_at"
     ).fetchall()
     return [{**dict(r), "url": f"https://youtu.be/{r['video_id']}"} for r in rows]
+
+
+def notify(webhook_url: str, text: str, http=None) -> None:
+    """Best-effort message to the Discord/Slack webhook; never raises."""
+    if not webhook_url:
+        return
+    try:
+        import requests
+
+        (http or requests).post(webhook_url, json={"content": text[:1900], "text": text}, timeout=30)
+    except Exception:
+        log.exception("could not send notification")
 
 
 def send_digest(conn: sqlite3.Connection, webhook_url: str, http=None) -> int:

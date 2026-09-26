@@ -98,12 +98,36 @@ def test_reward_values_subscribers():
 
 # --- captions ------------------------------------------------------------
 
-def test_captions_are_relative_to_clip_start():
+def test_short_captions_highlight_each_word_and_show_hook():
     words = [{"start": 10 + i * 0.5, "end": 10.4 + i * 0.5, "word": f" w{i}"} for i in range(7)]
-    ass = media.captions_ass(words, 10.0, 14.0, "short")
+    ass = media.captions_ass(words, 10.0, 14.0, "short", hook="You won't believe")
     dialogue = [l for l in ass.splitlines() if l.startswith("Dialogue")]
-    assert len(dialogue) == 3
-    assert dialogue[0].startswith("Dialogue: 0,0:00:00.00,0:00:01.40,Default,W0 W1 W2")
+    assert dialogue[0] == "Dialogue: 1,0:00:00.00,0:00:03.00,Hook,You won't believe"
+    words_events = dialogue[1:]
+    assert len(words_events) == 7  # one event per spoken word
+    # times are relative to the clip start; the first word is highlighted first
+    assert words_events[0].startswith("Dialogue: 0,0:00:00.00,0:00:00.50,Default,{\\c&H0000E6FF&}W0")
+    assert words_events[1].endswith("W0 {\\c&H0000E6FF&}W1{\\c&H00FFFFFF&} W2")
+
+
+def test_long_captions_are_plain_lines():
+    words = [{"start": i, "end": i + 0.5, "word": f" w{i}"} for i in range(10)]
+    ass = media.captions_ass(words, 0, 10, "long", hook="ignored")
+    dialogue = [l for l in ass.splitlines() if l.startswith("Dialogue")]
+    assert len(dialogue) == 2 and dialogue[0].endswith("w0 w1 w2 w3 w4 w5 w6 w7")
+
+
+def test_face_center_needs_one_steady_face():
+    assert media.pick_center([0.5] * 10, 16) == 0.5
+    assert media.pick_center([0.5] * 5, 16) is None             # face rarely found
+    assert media.pick_center([0.2, 0.8] * 6, 16) is None        # two people far apart
+
+
+def test_crop_box_stays_inside_frame():
+    assert media.crop_box(1920, 1080, 0.5) == (606, 1080, 657)
+    assert media.crop_box(1920, 1080, 0.0)[2] == 0
+    assert media.crop_box(1920, 1080, 1.0)[2] == 1920 - 606
+    assert media.crop_box(1080, 1920, 0.5) is None              # already vertical
 
 
 # --- Claude calls --------------------------------------------------------
@@ -119,14 +143,25 @@ def _claude_returning(payload, stop_reason="end_turn"):
 
 def test_pick_clips_filters_bad_lengths_and_caps_shorts():
     client = _claude_returning({"clips": [
-        {"start": 0, "end": 40, "title": "ok", "description": "d", "tags": [], "why": ""},
-        {"start": 100, "end": 400, "title": "too long", "description": "d", "tags": [], "why": ""},
-        {"start": 200, "end": 261, "title": "a bit long", "description": "d", "tags": [], "why": ""},
+        {"start": 0, "end": 40, "title": "ok", "description": "d", "tags": [], "hook_text": "h", "score": 7, "why": ""},
+        {"start": 100, "end": 400, "title": "too long", "description": "d", "tags": [], "hook_text": "h", "score": 7, "why": ""},
+        {"start": 200, "end": 261, "title": "a bit long", "description": "d", "tags": [], "hook_text": "h", "score": 7, "why": ""},
     ]})
     clips = ai.pick_clips(client, [{"start": 0, "end": 5, "text": "hi"}], source_title="T", fmt="short",
                           min_sec=35, max_sec=58, title_style="question", count=5)
     assert [c["title"] for c in clips] == ["ok", "a bit long"]
     assert clips[1]["end"] == 259
+
+
+def test_pick_clips_drops_weak_and_sorts_best_first():
+    client = _claude_returning({"clips": [
+        {"start": 0, "end": 40, "title": "meh", "description": "d", "tags": [], "hook_text": "", "score": 5, "why": ""},
+        {"start": 50, "end": 90, "title": "good", "description": "d", "tags": [], "hook_text": "", "score": 7, "why": ""},
+        {"start": 100, "end": 140, "title": "great", "description": "d", "tags": [], "hook_text": "", "score": 9, "why": ""},
+    ]})
+    clips = ai.pick_clips(client, [], source_title="T", fmt="short", min_sec=35, max_sec=58,
+                          title_style="number", count=5)
+    assert [c["title"] for c in clips] == ["great", "good"]
     kwargs = client.beta.messages.create.call_args.kwargs
     assert kwargs["model"] == "claude-opus-5" and kwargs["fallbacks"] == "default"
 
@@ -135,6 +170,13 @@ def test_refusal_raises():
     client = _claude_returning({}, stop_reason="refusal")
     with pytest.raises(ai.ClaudeRefused):
         ai.trend_topics(client, ["x"], [])
+
+
+def test_notify_never_raises():
+    http = MagicMock()
+    http.post.side_effect = RuntimeError("down")
+    pipeline.notify("https://hooks.example/x", "boom", http)
+    pipeline.notify("", "no webhook set")
 
 
 def test_trend_topics_without_trends_uses_evergreen():
@@ -210,8 +252,12 @@ def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(campaigns, "download", lambda url, dest: dest)
     monkeypatch.setattr(media, "transcribe", lambda v, m: ([{"start": 0, "end": 50, "text": "hi"}], []))
     monkeypatch.setattr(media, "render", lambda video, out, *a: out)
+    captured_hooks = []
+    real_captions = media.captions_ass
+    monkeypatch.setattr(media, "captions_ass",
+                        lambda w, s, e, f, hook="": captured_hooks.append(hook) or real_captions(w, s, e, f, hook))
     claude = _claude_returning({"clips": [
-        {"start": 0, "end": 36, "title": "Clip", "description": "desc", "tags": ["a"], "why": ""}]})
+        {"start": 0, "end": 36, "title": "Clip", "description": "desc", "tags": ["a"], "hook_text": "Wait for it", "score": 8, "why": ""}]})
     yt = MagicMock()
     yt.upload.return_value = "vid1"
 
@@ -227,5 +273,6 @@ def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
     http = MagicMock()
     assert pipeline.send_digest(conn, "https://hooks.example/x", http) == 1
     assert "https://youtu.be/vid1" in http.post.call_args.kwargs["json"]["content"]
+    assert captured_hooks == ["Wait for it"]
     assert pipeline.pending_submissions(conn) == []
     assert pipeline.earnings(conn, settings)[0]["campaign"] == "pod"

@@ -65,3 +65,12 @@ python -m pytest                         # tests
 - **Claude API:** about 2 calls per cycle, a few cents each.
 - **Railway:** one small worker, plus a volume of about 5 GB.
 - **YouTube API:** free within quota.
+
+## What makes the clips perform
+
+- **Speaker crop:** Shorts crop full-screen to the speaker when one face is steady on screen. Otherwise they fall back to the full frame over a blurred fill.
+- **Word-by-word captions:** the spoken word is highlighted in yellow, since most viewers watch on mute.
+- **Hook text:** a 2–6 word hook sits on screen for the first 3 seconds to stop the scroll.
+- **Quality filter:** Claude scores each moment from 1 to 10 for how likely people are to watch it to the end and share it. Anything under 6 is never posted, because weak clips drag down the whole channel.
+- **Loudness:** audio is normalized to −14 LUFS, the level YouTube and TikTok play at.
+- **Failure alerts:** if a cycle fails, a message goes to `DIGEST_WEBHOOK_URL`, and the engine retries on the next cycle.

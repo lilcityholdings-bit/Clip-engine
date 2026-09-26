@@ -59,8 +59,10 @@ def main(argv: list[str]) -> int:
                              ("digest", lambda: pipeline.send_digest(conn, settings.digest_webhook_url))):
                 try:
                     fn()
-                except Exception:
+                except Exception as exc:
                     log.exception("%s cycle failed; will retry next cycle", step)
+                    pipeline.notify(settings.digest_webhook_url,
+                                    f"clip-engine: {step} cycle failed and will retry in {CYCLE_HOURS}h: {exc!r}")
             time.sleep(CYCLE_HOURS * 3600)
     else:
         print(__doc__)
