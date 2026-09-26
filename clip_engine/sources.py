@@ -47,7 +47,7 @@ def license_allowed(url: str | None) -> bool:
 def license_name(url: str) -> str:
     url = url.lower()
     if "publicdomain" in url:
-        return "Public Domain" if "mark" in url else "CC0"
+        return "CC0" if "zero" in url else "Public Domain"
     if "by-sa" in url:
         return "CC BY-SA"
     return "CC BY"
@@ -61,10 +61,11 @@ class Source:
     license_url: str
     video_url: str
     duration: float
+    page: str = ""  # link to the original; defaults to the archive.org item page
 
     @property
     def page_url(self) -> str:
-        return f"https://archive.org/details/{self.identifier}"
+        return self.page or f"https://archive.org/details/{self.identifier}"
 
 
 def _duration(value) -> float:

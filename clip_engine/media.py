@@ -1,4 +1,5 @@
 """Download, transcribe and render clips with ffmpeg and faster-whisper."""
+import os
 import subprocess
 from pathlib import Path
 
@@ -6,7 +7,8 @@ import requests
 
 from .sources import USER_AGENT
 
-MAX_TRANSCRIBE_SEC = 45 * 60  # only the first 45 minutes are searched for clips
+# Only the start of long videos is searched for clips, to bound transcription time.
+MAX_TRANSCRIBE_SEC = int(os.environ.get("MAX_TRANSCRIBE_MINUTES", "60")) * 60
 
 
 def download(url: str, dest: Path) -> Path:

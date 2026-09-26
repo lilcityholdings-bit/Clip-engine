@@ -17,6 +17,7 @@ class Settings:
     trend_region: str = field(default_factory=lambda: os.environ.get("TREND_REGION", "US"))
     score_after_hours: int = field(default_factory=lambda: int(os.environ.get("SCORE_AFTER_HOURS", "48")))
     whisper_model: str = field(default_factory=lambda: os.environ.get("WHISPER_MODEL", "base"))
+    digest_webhook_url: str = field(default_factory=lambda: os.environ.get("DIGEST_WEBHOOK_URL", ""))
 
     @property
     def db_path(self) -> Path:

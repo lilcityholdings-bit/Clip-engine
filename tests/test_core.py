@@ -169,3 +169,63 @@ def test_score_updates_strategy(conn, tmp_path):
     assert board[("topic", "space")]["n"] == 1
     row = conn.execute("SELECT views, subscribers_gained FROM uploads WHERE video_id='old'").fetchone()
     assert tuple(row) == (500, 3)
+
+
+# --- campaigns -----------------------------------------------------------
+
+from clip_engine import campaigns  # noqa: E402
+
+CAMPAIGN = {
+    "id": "pod", "name": "Pod clips", "program_url": "https://whop.com/pod",
+    "rate_per_1k_views": 2.0, "sources": ["https://www.youtube.com/@pod/videos"],
+    "caption_required": "@pod #pod", "rules": "No sponsor reads.",
+}
+
+
+def test_campaign_loading_and_expiry(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAMPAIGNS_JSON", json.dumps([CAMPAIGN, {**CAMPAIGN, "id": "old", "ends_on": "2000-01-01"}]))
+    loaded = campaigns.load(tmp_path)
+    assert [c.id for c in campaigns.live(loaded)] == ["pod"]
+
+
+def test_campaign_caption_has_credit_tags_and_disclosure():
+    c = campaigns.Campaign(**CAMPAIGN)
+    src = sources.Source("u", "Ep 1", "Pod Host", c.program_url, "u", 3600, page="https://youtu.be/x")
+    text = campaigns.caption_lines(c, src, "short")
+    assert "Pod Host" in text and "https://youtu.be/x" in text
+    assert "@pod #pod" in text and "#ad" in text and "#Shorts" in text
+
+
+def test_campaign_reward_uses_pay_rate():
+    assert strategy.reward(1000, 0, rate_per_1k=3.0) > strategy.reward(1000, 0, rate_per_1k=1.0)
+
+
+def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
+    monkeypatch.setenv("CAMPAIGNS_JSON", json.dumps([CAMPAIGN]))
+    settings = Settings(data_dir=tmp_path, max_uploads_per_day=5)
+    src = sources.Source("https://youtu.be/ep1", "Ep 1", "Pod Host", CAMPAIGN["program_url"],
+                         "https://youtu.be/ep1", 3600, page="https://youtu.be/ep1")
+    monkeypatch.setattr(campaigns, "latest_videos", lambda url: ["https://youtu.be/ep1"])
+    monkeypatch.setattr(campaigns, "describe", lambda c, url: src)
+    monkeypatch.setattr(campaigns, "download", lambda url, dest: dest)
+    monkeypatch.setattr(media, "transcribe", lambda v, m: ([{"start": 0, "end": 50, "text": "hi"}], []))
+    monkeypatch.setattr(media, "render", lambda video, out, *a: out)
+    claude = _claude_returning({"clips": [
+        {"start": 0, "end": 36, "title": "Clip", "description": "desc", "tags": ["a"], "why": ""}]})
+    yt = MagicMock()
+    yt.upload.return_value = "vid1"
+
+    assert pipeline.produce(conn, settings, claude, yt, 2) == 1
+    title, description, tags = yt.upload.call_args.args[1:]
+    assert "#ad" in description and "@pod #pod" in description
+    assert "No sponsor reads." in claude.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+    row = conn.execute("SELECT campaign_id, arms FROM uploads").fetchone()
+    assert row["campaign_id"] == "pod" and json.loads(row["arms"])["campaign"] == "pod"
+    # the same video is never clipped twice
+    assert pipeline.produce(conn, settings, claude, yt, 2) == 0
+
+    http = MagicMock()
+    assert pipeline.send_digest(conn, "https://hooks.example/x", http) == 1
+    assert "https://youtu.be/vid1" in http.post.call_args.kwargs["json"]["content"]
+    assert pipeline.pending_submissions(conn) == []
+    assert pipeline.earnings(conn, settings)[0]["campaign"] == "pod"

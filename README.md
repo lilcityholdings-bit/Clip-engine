@@ -1,6 +1,23 @@
 # Clip Engine
 
-A fully automated YouTube clip channel. Every 6 hours it:
+A fully automated clip channel. It runs in one of two modes:
+
+- **Campaign mode** (the main one): it clips the newest videos of creators who pay per view through clipping programs such as Whop Content Rewards. Joining a program gives you the right to repost that creator's content. The engine learns which campaigns, clip lengths and title styles earn the most, measured as views × pay rate plus subscribers.
+- **Archive mode** (used when no campaigns are set up): it clips public-domain videos from the Internet Archive, as described below.
+
+## Campaign mode
+
+1. Join a clipping campaign and read its rules.
+2. Add it to `CAMPAIGNS_JSON`. The format is at the top of `clip_engine/campaigns.py`: pay rate, the creator's channel or Drive links, required caption tags and the creator's rules.
+3. The engine takes each creator's newest videos, has Claude pick moments that follow the creator's rules, and posts them. Each post credits the creator, includes the required tags and adds a paid-promotion disclosure (**#ad**), which the FTC requires for paid clips.
+4. Whop has no API for submitting clips, so the day's new links are sent to `DIGEST_WEBHOOK_URL` (a Discord or Slack channel on your phone) for you to paste into each campaign. Programs that track views by connecting your channel need no submission step at all.
+5. `python -m clip_engine report` shows estimated earnings per campaign.
+
+YouTube often blocks downloads from cloud servers, so prefer campaigns that share raw files through Google Drive or Dropbox links.
+
+## Archive mode
+
+Every 6 hours it:
 
 1. **Scores** videos that are at least 48 hours old (views and subscribers gained), and feeds the results into its strategy.
 2. **Finds trends** by reading YouTube's trending chart and having Claude turn it into search topics.

@@ -19,11 +19,16 @@ LENGTHS = {
     "long": ["120-300", "300-600"],
 }
 SUBSCRIBER_WEIGHT = 50  # one subscriber is worth about 50 views
+SUBSCRIBER_CENTS = 5    # in campaign mode, a subscriber is worth about 5 cents of future payouts
 PRIOR_SD = 2.0
 
 
-def reward(views: int, subscribers_gained: int) -> float:
-    return math.log1p(max(views, 0) + SUBSCRIBER_WEIGHT * max(subscribers_gained, 0))
+def reward(views: int, subscribers_gained: int, rate_per_1k: float | None = None) -> float:
+    """Log-scaled value of a video. With a campaign pay rate, value is estimated cents earned."""
+    views, subs = max(views, 0), max(subscribers_gained, 0)
+    if rate_per_1k is not None:
+        return math.log1p(views * rate_per_1k / 10 + subs * SUBSCRIBER_CENTS)
+    return math.log1p(views + SUBSCRIBER_WEIGHT * subs)
 
 
 def _stats(conn: sqlite3.Connection, dimension: str) -> dict[str, tuple[int, float, float]]:
@@ -52,13 +57,18 @@ def choose(conn: sqlite3.Connection, dimension: str, arms: list[str], rng: rando
     return max(arms, key=sample)
 
 
-def plan(conn: sqlite3.Connection, topics: list[str], rng: random.Random | None = None) -> dict[str, str]:
-    """Choose the arms for the next upload."""
-    fmt = choose(conn, "format", FORMATS, rng)
+def plan(conn: sqlite3.Connection, subjects: list[str], rng: random.Random | None = None,
+         subject_dim: str = "topic", formats: list[str] | None = None) -> dict[str, str]:
+    """Choose the arms for the next upload.
+
+    subjects are topics (archive mode) or campaign ids (campaign mode, subject_dim="campaign").
+    """
+    subject = choose(conn, subject_dim, subjects, rng)
+    fmt = choose(conn, "format", formats or FORMATS, rng)
     return {
+        subject_dim: subject,
         "format": fmt,
         "length": choose(conn, "length", [f"{fmt}:{r}" for r in LENGTHS[fmt]], rng),
-        "topic": choose(conn, "topic", topics, rng),
         "title_style": choose(conn, "title_style", TITLE_STYLES, rng),
     }
 

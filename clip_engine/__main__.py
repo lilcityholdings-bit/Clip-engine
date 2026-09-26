@@ -3,7 +3,8 @@
 python -m clip_engine run      # run forever (what Railway runs)
 python -m clip_engine produce  # one production cycle
 python -m clip_engine score    # one scoring cycle
-python -m clip_engine report   # print what the strategy has learned
+python -m clip_engine report   # what the strategy has learned, earnings, links to submit
+python -m clip_engine submitted all|VIDEO_ID...  # mark campaign links as submitted
 """
 import logging
 import sys
@@ -29,8 +30,20 @@ def main(argv: list[str]) -> int:
     conn = connect(settings.db_path)
 
     if command == "report":
+        print("What works (higher score = more views/earnings):")
         for row in strategy.leaderboard(conn):
-            print(f"{row['dimension']:12} {row['arm']:24} n={row['n']:<4} score={row['mean']:.2f}")
+            print(f"  {row['dimension']:12} {row['arm']:24} n={row['n']:<4} score={row['mean']:.2f}")
+        print("\nEstimated campaign earnings:")
+        for row in pipeline.earnings(conn, settings):
+            print(f"  {row['campaign']:24} posts={row['posts']:<4} views={row['views']:<9} ${row['estimated_usd']}")
+        print("\nLinks to submit:")
+        for row in pipeline.pending_submissions(conn):
+            print(f"  [{row['campaign_id']}] {row['url']}  {row['title']}")
+        return 0
+    if command == "submitted":
+        ids = [r["video_id"] for r in pipeline.pending_submissions(conn)] if argv[2:] == ["all"] else argv[2:]
+        pipeline.mark_submitted(conn, ids)
+        print(f"marked {len(ids)} as submitted")
         return 0
 
     claude = anthropic.Anthropic()
@@ -42,7 +55,8 @@ def main(argv: list[str]) -> int:
     elif command == "run":
         while True:
             for step, fn in (("score", lambda: pipeline.score(conn, settings, yt)),
-                             ("produce", lambda: pipeline.produce(conn, settings, claude, yt, CLIPS_PER_CYCLE))):
+                             ("produce", lambda: pipeline.produce(conn, settings, claude, yt, CLIPS_PER_CYCLE)),
+                             ("digest", lambda: pipeline.send_digest(conn, settings.digest_webhook_url))):
                 try:
                     fn()
                 except Exception:

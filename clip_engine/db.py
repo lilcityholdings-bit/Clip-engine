@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS uploads (
     end_sec REAL NOT NULL,
     title TEXT NOT NULL,
     arms TEXT NOT NULL,               -- JSON {dimension: arm} chosen for this upload
+    campaign_id TEXT,                 -- clipping campaign this post belongs to, if any
+    submitted_at TEXT,                -- when the link was submitted to the campaign
     uploaded_at TEXT NOT NULL DEFAULT (datetime('now')),
     views INTEGER,
     subscribers_gained INTEGER,

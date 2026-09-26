@@ -75,6 +75,7 @@ def pick_clips(
     max_sec: int,
     title_style: str,
     count: int,
+    rules: str = "",
 ) -> list[dict]:
     """Choose the most watchable self-contained moments and write metadata for them.
 
@@ -117,6 +118,8 @@ def pick_clips(
         "Description: 1-2 sentences about the clip (attribution is added separately). "
         "Tags: 5-10 search terms."
     )
+    if rules:
+        prompt += f"\n\nThe creator's rules for clips (must follow): {rules}"
     clips = _json_call(client, prompt, schema, effort="high")["clips"]
     valid = []
     for c in clips:
