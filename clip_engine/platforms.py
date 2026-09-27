@@ -217,6 +217,60 @@ class InstagramPublisher:
         return out
 
 
+class AyrsharePublisher:
+    """Posts through Ayrshare, which already has approved access to each platform.
+
+    The easy setup: connect YouTube, TikTok and Instagram in Ayrshare's app and set
+    AYRSHARE_API_KEY. No developer apps or platform reviews needed.
+    """
+    API = "https://api.ayrshare.com/api"
+    VIEW_FIELDS = {"youtube": ["views"], "tiktok": ["videoViews"],
+                   "instagram": ["viewsCount", "igReelsAggregatedAllPlaysCount"]}
+
+    def __init__(self, platform: str, api_key: str, daily_limit: int, http=None):
+        self.name = platform
+        self.api_key = api_key
+        self.daily_limit = daily_limit
+        self.http = http or requests.Session()
+
+    def _post(self, path: str, body: dict) -> dict:
+        resp = self.http.post(f"{self.API}/{path}", json=body, timeout=300,
+                              headers={"Authorization": f"Bearer {self.api_key}"})
+        return resp.json()
+
+    def publish(self, clip: dict, path: Path, public_url: str) -> tuple[str, str]:
+        if not public_url:
+            raise PublishError("Ayrshare needs PUBLIC_BASE_URL so it can fetch the video")
+        paid = bool(clip.get("campaign_id"))
+        body = {
+            "post": f"{clip['title']}\n\n{clip['description']}"[:2200],
+            "platforms": [self.name],
+            "mediaUrls": [public_url],
+        }
+        if self.name == "youtube":
+            body["youTubeOptions"] = {"title": clip["title"][:100], "visibility": "public", "shorts": True,
+                                      "tags": [t for t in json.loads(clip["tags"]) if len(t) >= 2][:15],
+                                      "madeForKids": False}
+            body["post"] = clip["description"][:5000]
+        elif self.name == "tiktok":
+            body["tikTokOptions"] = {"isBrandedContent": paid, "thumbNailOffset": 1000}
+        data = self._post("post", body)
+        results = [r for r in data.get("postIds", []) if r.get("platform") == self.name]
+        if data.get("status") != "success" or not results or results[0].get("status") != "success":
+            raise PublishError(f"Ayrshare {self.name}: {data.get('errors') or data}")
+        return data["id"], results[0].get("postUrl", "")
+
+    def stats(self, ids: list[str]) -> dict[str, tuple[int, int]]:
+        out = {}
+        for post_id in ids:
+            data = self._post("analytics/post", {"id": post_id, "platforms": [self.name]})
+            section = data.get(self.name) or {}
+            analytics = section.get("analytics", section)
+            views = next((analytics[f] for f in self.VIEW_FIELDS.get(self.name, []) if analytics.get(f)), 0)
+            out[post_id] = (int(views or 0), 0)
+        return out
+
+
 def enabled(settings: Settings, conn: sqlite3.Connection, yt) -> dict:
     """Publishers whose credentials are configured, by name."""
     pubs = {}
@@ -231,6 +285,13 @@ def enabled(settings: Settings, conn: sqlite3.Connection, yt) -> dict:
         pubs["instagram"] = InstagramPublisher(
             conn, os.environ["INSTAGRAM_USER_ID"], os.environ["INSTAGRAM_ACCESS_TOKEN"],
             int(os.environ.get("INSTAGRAM_MAX_PER_DAY", "25")))
+    # Ayrshare covers any platform that isn't connected directly.
+    if os.environ.get("AYRSHARE_API_KEY"):
+        limits = {"youtube": settings.max_uploads_per_day, "tiktok": 15, "instagram": 25}
+        wanted = os.environ.get("AYRSHARE_PLATFORMS", "youtube,tiktok,instagram").split(",")
+        for platform in (p.strip() for p in wanted):
+            if platform in limits and platform not in pubs:
+                pubs[platform] = AyrsharePublisher(platform, os.environ["AYRSHARE_API_KEY"], limits[platform])
     return pubs
 
 

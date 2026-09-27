@@ -2,6 +2,15 @@
 
 A fully automated clipping business. It finds long videos, cuts the best moments into Shorts, posts them to **YouTube, TikTok and Instagram Reels**, and learns from views and earnings what to make next.
 
+## Easy setup (about 15 minutes, all from a phone)
+
+1. **Ayrshare** (ayrshare.com): sign up on a plan that includes API access and video. Connect your YouTube, TikTok and Instagram accounts in their app, then copy your API key. Ayrshare is already approved by all three platforms, so no developer apps or platform reviews are needed.
+2. **Claude API key**: console.anthropic.com → API Keys.
+3. **Campaigns**: join 1–3 clipping campaigns (e.g. on Whop) and note each one's pay rate, the creator's channel link, required tags and rules.
+4. **Railway**: deploy this repo, add a volume at `/data`, generate a domain, and set only these variables: `ANTHROPIC_API_KEY`, `AYRSHARE_API_KEY`, `PUBLIC_BASE_URL`, `DASHBOARD_PASSWORD`, `CAMPAIGNS_JSON`, `DATA_DIR=/data`.
+
+That's it. The direct YouTube, TikTok and Instagram connections described further down are optional. They save Ayrshare's fee, but each needs a developer app and a platform review.
+
 ## How it works
 
 Every 5 minutes the scheduler checks what needs doing:

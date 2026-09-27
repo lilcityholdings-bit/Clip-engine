@@ -10,6 +10,7 @@ Every external account and dependency this product relies on. Keep it current, b
 | Anthropic API key | Picks clips and writes titles | Company Anthropic org (TBD) | Buyer issues their own key |
 | TikTok account + TikTok developer app | Posting clips (Content Posting API) | Company account (TBD) | Transfer account login; buyer re-authorizes the app |
 | Instagram professional account + Meta app | Posting Reels | Company Meta Business account (TBD) | Transfer via Meta Business Suite |
+| Ayrshare account | Posting to YouTube, TikTok and Instagram without developer apps | Company email (TBD) | Transfer account; buyer reconnects social accounts |
 | Discord/Slack webhook | Links to submit and failure alerts | Company workspace (TBD) | Buyer creates their own webhook |
 | Clipping program memberships (e.g. Whop) | Paid campaigns and payouts | Company account (TBD) | Buyer rejoins programs; payouts to company bank account |
 | Railway project `clip-engine` | Hosting, plus a volume for the database | Company Railway account (TBD) | Railway project transfer |

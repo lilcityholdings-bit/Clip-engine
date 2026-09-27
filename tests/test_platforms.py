@@ -174,3 +174,39 @@ def test_dashboard_disabled_without_password(tmp_path):
     finally:
         srv.shutdown()
 
+
+
+def test_ayrshare_publish_and_stats(tmp_path):
+    http = MagicMock()
+    http.post.side_effect = [
+        _resp({"status": "success", "id": "ayr1",
+               "postIds": [{"platform": "tiktok", "status": "success", "postUrl": "https://tiktok.com/@me/video/1"}]}),
+        _resp({"status": "success", "tiktok": {"analytics": {"videoViews": 4321}}}),
+    ]
+    pub = platforms.AyrsharePublisher("tiktok", "KEY", 15, http=http)
+    assert pub.publish(CLIP, tmp_path / "c.mp4", "https://engine.example/media/x.mp4") == (
+        "ayr1", "https://tiktok.com/@me/video/1")
+    body = http.post.call_args_list[0].kwargs["json"]
+    assert body["platforms"] == ["tiktok"] and body["mediaUrls"] == ["https://engine.example/media/x.mp4"]
+    assert body["tikTokOptions"]["isBrandedContent"] is True
+    assert http.post.call_args_list[0].kwargs["headers"]["Authorization"] == "Bearer KEY"
+    assert pub.stats(["ayr1"]) == {"ayr1": (4321, 0)}
+
+
+def test_ayrshare_youtube_short_and_errors(tmp_path):
+    http = MagicMock()
+    http.post.return_value = _resp({"status": "error", "errors": [{"message": "not linked"}]})
+    pub = platforms.AyrsharePublisher("youtube", "KEY", 5, http=http)
+    with pytest.raises(platforms.PublishError, match="not linked"):
+        pub.publish({**CLIP, "tags": '["ab", "x"]'}, tmp_path / "c.mp4", "https://e.example/m.mp4")
+    yt = http.post.call_args.kwargs["json"]["youTubeOptions"]
+    assert yt == {"title": "Big moment", "visibility": "public", "shorts": True, "tags": ["ab"], "madeForKids": False}
+
+
+def test_ayrshare_fills_platforms_not_connected_directly(conn, monkeypatch):
+    for k in ("TIKTOK_CLIENT_KEY", "TIKTOK_REFRESH_TOKEN", "INSTAGRAM_USER_ID", "INSTAGRAM_ACCESS_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("AYRSHARE_API_KEY", "KEY")
+    pubs = platforms.enabled(Settings(youtube_refresh_token=""), conn, None)
+    assert sorted(pubs) == ["instagram", "tiktok", "youtube"]
+    assert all(isinstance(p, platforms.AyrsharePublisher) for p in pubs.values())
