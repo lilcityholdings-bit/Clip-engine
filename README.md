@@ -29,7 +29,9 @@ Each clip records the choices behind it: **campaign or topic, format, clip lengt
 
 - **Learns from its own results:** once 8 clips have been scored, Claude sees the channel's best and worst clips (real titles, hooks and view counts) every time it picks new moments.
 - **Quality filter:** Claude scores every moment from 1 to 10 for watch-through and shares. Anything under 6 is never posted.
-- **Speaker crop:** Shorts fill the screen with the speaker's face. When there's no single steady face, they fall back to the full frame over a blurred fill.
+- **Most-replayed moments:** for YouTube videos, the engine reads the "most replayed" graph and transcribes the minutes around the top peaks, anywhere in a 3-hour podcast. Claude is told which lines viewers rewatch most.
+- **Loud moments:** the transcript flags lines where the speaker gets louder than usual (laughing, shouting, excitement), since Claude can't hear the audio.
+- **Framing:** two-person shows get a stacked layout, with each speaker zoomed to head-and-shoulders in their own half and captions on the seam. Single speakers get a crop that follows their face and jumps with camera cuts. With no clear faces, it falls back to the full frame over a blurred fill.
 - **Word-by-word captions:** the spoken word is highlighted, since most viewers watch on mute.
 - **Hook text:** a 2–6 word hook is on screen for the first 3 seconds.
 - **Tight edits:** each cut starts on the first spoken word and ends just after the last, so there's no dead air.

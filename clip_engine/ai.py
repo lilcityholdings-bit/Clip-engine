@@ -68,6 +68,18 @@ def trend_topics(client: anthropic.Anthropic, trending_titles: list[str], past_t
     return cleaned or EVERGREEN_TOPICS
 
 
+def _line(seg: dict, prev: dict | None) -> str:
+    """One transcript line with markers for signals Claude can't hear or see."""
+    gap = "\n[... skipped part of the video ...]\n" if prev and prev.get("window", 0) != seg.get("window", 0) else ""
+    tags = []
+    if seg.get("replayed"):
+        tags.append("MOST REPLAYED")
+    if seg.get("energy", 1.0) >= 1.6:
+        tags.append("LOUD")
+    tag = f" <{', '.join(tags)}>" if tags else ""
+    return f"{gap}[{seg['start']:.1f}-{seg['end']:.1f}]{tag} {seg['text'].strip()}"
+
+
 def pick_clips(
     client: anthropic.Anthropic,
     transcript: list[dict],
@@ -85,7 +97,7 @@ def pick_clips(
 
     transcript: [{"start": float, "end": float, "text": str}, ...]
     """
-    lines = "\n".join(f"[{s['start']:.1f}-{s['end']:.1f}] {s['text'].strip()}" for s in transcript)
+    lines = "\n".join(_line(s, transcript[i - 1] if i else None) for i, s in enumerate(transcript))
     schema = {
         "type": "object",
         "properties": {
@@ -118,7 +130,11 @@ def pick_clips(
         "seconds long, make sense on its own without the rest of the video, open with a "
         "strong hook in the first 3 seconds, and start and end on sentence boundaries "
         "(use the timestamps above). Prefer surprising facts, strong opinions, clear "
-        "explanations and emotional moments. Don't overlap clips.\n\n"
+        "explanations and emotional moments. Don't overlap clips.\n"
+        "Markers: <MOST REPLAYED> means YouTube viewers rewatch that part most, a strong "
+        "sign it's the best material. <LOUD> means the speaker got louder than usual "
+        "(laughing, shouting, excitement). Never make a clip that crosses a "
+        "'skipped part of the video' line.\n\n"
         f"Title style: {TITLE_STYLE_GUIDE[title_style]} Keep titles under 70 characters, "
         "accurate to what's said, with no ALL CAPS words or emoji spam. "
         "Description: 1-2 sentences about the clip (attribution is added separately). "

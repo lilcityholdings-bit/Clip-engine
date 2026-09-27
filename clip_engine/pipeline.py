@@ -17,7 +17,7 @@ from pathlib import Path
 
 import anthropic
 
-from . import ai, campaigns, media, sources, strategy
+from . import ai, campaigns, media, moments, sources, strategy
 from .config import Settings
 from .db import clips_today, posts_today
 from .platforms import PublishError, next_slot
@@ -201,7 +201,10 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             video = campaigns.download(src.video_url, work / "source.mp4")
         else:
             video = media.download(src.video_url, work / "source.mp4")
-        segments, words = media.transcribe(video, settings.whisper_model)
+        # Go straight to the most replayed parts when YouTube has that data.
+        windows = moments.windows(src.heatmap, src.duration)
+        segments, words = media.transcribe(video, settings.whisper_model, windows or None)
+        moments.mark_replayed(segments, src.heatmap)
         if not segments:
             log.warning("no speech found in %s", src.identifier)
             return 0
@@ -213,13 +216,19 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             track_record=track_record(conn),
         )
         for i, clip in enumerate(clips):
+            if not moments.same_window(clip, segments):
+                log.info("skipping clip that crosses a transcript gap: %s", clip["title"])
+                continue
             clip = snap_to_words(clip, words)
             if arms["format"] == "short":
                 clip["end"] = min(clip["end"], clip["start"] + 59)
             token = secrets.token_hex(16)
+            frame = media.plan_layout(video, clip["start"], clip["end"]) if arms["format"] == "short" else None
             out = media.render(
                 video, out_dir / f"{token}.mp4", clip["start"], clip["end"], arms["format"],
-                media.captions_ass(words, clip["start"], clip["end"], arms["format"], clip.get("hook_text", "")),
+                media.captions_ass(words, clip["start"], clip["end"], arms["format"], clip.get("hook_text", ""),
+                                   center=bool(frame and frame.kind == "stack")),
+                frame=frame,
             )
             cur = conn.execute(
                 "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags,"

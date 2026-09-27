@@ -118,19 +118,6 @@ def test_long_captions_are_plain_lines():
     assert len(dialogue) == 2 and dialogue[0].endswith("w0 w1 w2 w3 w4 w5 w6 w7")
 
 
-def test_face_center_needs_one_steady_face():
-    assert media.pick_center([0.5] * 10, 16) == 0.5
-    assert media.pick_center([0.5] * 5, 16) is None             # face rarely found
-    assert media.pick_center([0.2, 0.8] * 6, 16) is None        # two people far apart
-
-
-def test_crop_box_stays_inside_frame():
-    assert media.crop_box(1920, 1080, 0.5) == (606, 1080, 657)
-    assert media.crop_box(1920, 1080, 0.0)[2] == 0
-    assert media.crop_box(1920, 1080, 1.0)[2] == 1920 - 606
-    assert media.crop_box(1080, 1920, 0.5) is None              # already vertical
-
-
 # --- Claude calls --------------------------------------------------------
 
 def _claude_returning(payload, stop_reason="end_turn"):
@@ -340,9 +327,20 @@ def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(campaigns, "describe", lambda c, url: src)
     monkeypatch.setattr(campaigns, "download", lambda url, dest: dest)
     words = [{"start": 1.0 + i, "end": 1.5 + i, "word": f" w{i}"} for i in range(40)]
-    monkeypatch.setattr(media, "transcribe", lambda v, m: ([{"start": 0, "end": 50, "text": "hi"}], words))
+    heatmap = [{"start_time": 0, "end_time": 10, "value": 0.2}, {"start_time": 20, "end_time": 30, "value": 1.0}]
+    src.heatmap = heatmap
+    seen_windows = []
 
-    def fake_render(video, out, *a):
+    def fake_transcribe(v, m, windows=None):
+        seen_windows.append(windows)
+        return [{"start": 0, "end": 50, "text": "hi", "window": 0, "energy": 2.0}], words
+    monkeypatch.setattr(media, "transcribe", fake_transcribe)
+    from clip_engine import layout
+    monkeypatch.setattr(media, "plan_layout", lambda v, s, e: layout.Layout("stack", left=0.3, right=0.7))
+    centers = []
+
+    def fake_render(video, out, *a, frame=None):
+        centers.append(frame.kind)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"clip")
         return out
@@ -350,15 +348,19 @@ def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
     captured_hooks = []
     real_captions = media.captions_ass
     monkeypatch.setattr(media, "captions_ass",
-                        lambda w, s, e, f, hook="": captured_hooks.append(hook) or real_captions(w, s, e, f, hook))
+                        lambda w, s, e, f, hook="", center=False: captured_hooks.append((hook, center))
+                        or real_captions(w, s, e, f, hook, center))
     claude = _claude_returning({"clips": [
         {"start": 1, "end": 37, "title": "Clip", "description": "desc", "tags": ["a"], "hook_text": "Wait for it",
          "score": 8, "why": ""}]})
     pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok"), "instagram": FakePub("instagram")}
 
     assert pipeline.produce(conn, settings, claude, None, pubs, 2) == 1
-    assert captured_hooks == ["Wait for it"]
-    assert "No sponsor reads." in claude.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert captured_hooks == [("Wait for it", True)]  # two-person layout puts captions on the seam
+    assert centers == ["stack"]
+    assert seen_windows == [[(0.0, 175.0)]]  # transcribed around the most replayed peak
+    prompt = claude.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "No sponsor reads." in prompt and "<MOST REPLAYED, LOUD>" in prompt
     clip = conn.execute("SELECT * FROM clips").fetchone()
     assert clip["campaign_id"] == "pod" and json.loads(clip["arms"])["campaign"] == "pod"
     assert "#ad" in clip["description"] and "@pod #pod" in clip["description"]

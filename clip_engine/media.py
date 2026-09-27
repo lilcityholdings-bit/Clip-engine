@@ -5,6 +5,7 @@ from pathlib import Path
 
 import requests
 
+from . import layout
 from .sources import USER_AGENT
 
 # Only the start of long videos is searched for clips, to bound transcription time.
@@ -29,23 +30,54 @@ def _run(args: list[str], cwd: Path | None = None) -> None:
         raise RuntimeError(f"{args[0]} failed: {result.stderr[-2000:]}")
 
 
-def transcribe(video: Path, model_size: str) -> tuple[list[dict], list[dict]]:
-    """Return (segments, words) with times in seconds."""
+def transcribe(video: Path, model_size: str,
+               windows: list[tuple[float, float]] | None = None) -> tuple[list[dict], list[dict]]:
+    """Return (segments, words) with times in seconds from the start of the video.
+
+    Only the given (start, end) windows are transcribed, e.g. the most replayed parts
+    of a long podcast; by default the first MAX_TRANSCRIBE_MINUTES. Each segment gets
+    "window" (its index) and "energy" (loudness relative to the median segment), so
+    laughs and raised voices stand out even though Claude only reads the text.
+    """
+    import numpy as np
     from faster_whisper import WhisperModel  # heavy import, only needed here
 
-    audio = video.with_suffix(".wav")
-    _run(["ffmpeg", "-y", "-v", "error", "-i", str(video), "-t", str(MAX_TRANSCRIBE_SEC),
-          "-vn", "-ac", "1", "-ar", "16000", str(audio)])
+    windows = windows or [(0.0, float(MAX_TRANSCRIBE_SEC))]
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    raw_segments, _ = model.transcribe(str(audio), word_timestamps=True, vad_filter=True)
     segments, words = [], []
-    for seg in raw_segments:
-        segments.append({"start": seg.start, "end": seg.end, "text": seg.text})
-        for w in seg.words or []:
-            words.append({"start": w.start, "end": w.end, "word": w.word})
-    audio.unlink(missing_ok=True)
+    audio = video.with_suffix(".wav")
+    for index, (w_start, w_end) in enumerate(windows):
+        _run(["ffmpeg", "-y", "-v", "error", "-ss", f"{w_start:.2f}", "-i", str(video), "-t", f"{w_end - w_start:.2f}",
+              "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", str(audio)])
+        samples = _read_wav(audio)
+        raw_segments, _ = model.transcribe(str(audio), word_timestamps=True, vad_filter=True)
+        for seg in raw_segments:
+            chunk = samples[int(seg.start * 16000):int(seg.end * 16000)]
+            rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2))) if len(chunk) else 0.0
+            segments.append({"start": float(seg.start + w_start), "end": float(seg.end + w_start), "text": seg.text,
+                             "window": index, "rms": rms})
+            for w in seg.words or []:
+                words.append({"start": float(w.start + w_start), "end": float(w.end + w_start), "word": w.word})
+        audio.unlink(missing_ok=True)
+    add_energy(segments)
     return segments, words
 
+
+def _read_wav(path: Path):
+    import wave
+
+    import numpy as np
+
+    with wave.open(str(path), "rb") as f:
+        return np.frombuffer(f.readframes(f.getnframes()), dtype=np.int16)
+
+
+def add_energy(segments: list[dict]) -> None:
+    """energy = segment loudness / median loudness (1.0 = typical)."""
+    levels = sorted(s.get("rms", 0.0) for s in segments if s.get("rms"))
+    median = levels[len(levels) // 2] if levels else 0.0
+    for s in segments:
+        s["energy"] = round(s.pop("rms", 0.0) / median, 2) if median else 1.0
 
 
 # ASS colours are &HAABBGGRR.
@@ -64,7 +96,8 @@ def _clean(text: str) -> str:
     return text.strip().replace("{", "").replace("}", "").replace("\\", "")
 
 
-def captions_ass(words: list[dict], start: float, end: float, fmt: str, hook: str = "") -> str:
+def captions_ass(words: list[dict], start: float, end: float, fmt: str, hook: str = "",
+                 center: bool = False) -> str:
     """Burned-in captions.
 
     Shorts: 3-word chunks in the lower third with the spoken word highlighted, plus
@@ -73,13 +106,16 @@ def captions_ass(words: list[dict], start: float, end: float, fmt: str, hook: st
     """
     short = fmt == "short"
     res, size, margin, per_chunk = ((1080, 1920), 84, 520, 3) if short else ((1920, 1080), 54, 60, 8)
+    # In the two-person layout, captions sit on the seam between the speakers.
+    align = 5 if (short and center) else 2
+    margin = 0 if align == 5 else margin
     header = (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {res[0]}\nPlayResY: {res[1]}\nWrapStyle: 0\n\n"
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV\n"
-        f"Style: Default,DejaVu Sans,{size},{WHITE},{BLACK},{SHADOW},1,1,5,0,2,60,60,{margin}\n"
+        f"Style: Default,DejaVu Sans,{size},{WHITE},{BLACK},{SHADOW},1,1,5,0,{align},60,60,{margin}\n"
         f"Style: Hook,DejaVu Sans,{int(size * 0.9)},{BLACK},{WHITE},{SHADOW},1,3,18,0,8,80,80,260\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Text\n"
     )
@@ -106,53 +142,6 @@ def captions_ass(words: list[dict], start: float, end: float, fmt: str, hook: st
     return header + "\n".join(lines) + "\n"
 
 
-def face_center(video: Path, start: float, end: float, samples: int = 16) -> float | None:
-    """Horizontal position (0-1) of the main speaker's face, or None if there isn't one clear face.
-
-    Samples frames across the clip and takes the largest face in each. Returns
-    None when faces are rarely found or jump around (e.g. two people far apart),
-    in which case the caller falls back to the letterboxed layout.
-    """
-    import cv2  # heavy import, only needed here
-
-    detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    cap = cv2.VideoCapture(str(video))
-    centers = []
-    try:
-        for i in range(samples):
-            cap.set(cv2.CAP_PROP_POS_MSEC, (start + (end - start) * (i + 0.5) / samples) * 1000)
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            min_side = max(40, frame.shape[0] // 10)
-            faces = detector.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=6, minSize=(min_side, min_side))
-            if len(faces):
-                x, _, w, _ = max(faces, key=lambda f: f[2] * f[3])
-                centers.append((x + w / 2) / frame.shape[1])
-    finally:
-        cap.release()
-    return pick_center(centers, samples)
-
-
-def pick_center(centers: list[float], samples: int) -> float | None:
-    if len(centers) < samples / 2:
-        return None
-    centers = sorted(centers)
-    median = centers[len(centers) // 2]
-    spread = centers[int(len(centers) * 0.9) - 1] - centers[int(len(centers) * 0.1)]
-    return median if spread <= 0.25 else None
-
-
-def crop_box(width: int, height: int, center: float) -> tuple[int, int, int] | None:
-    """9:16 crop (w, h, x) around a horizontal center, or None if the source is already narrow."""
-    crop_w = int(height * 9 / 16) // 2 * 2
-    if crop_w >= width:
-        return None
-    x = int(center * width - crop_w / 2)
-    return crop_w, height, max(0, min(x, width - crop_w))
-
-
 def _dimensions(video: Path) -> tuple[int, int]:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
@@ -161,28 +150,24 @@ def _dimensions(video: Path) -> tuple[int, int]:
     return int(out[0]), int(out[1])
 
 
-def render(video: Path, out: Path, start: float, end: float, fmt: str, captions: str) -> Path:
+def plan_layout(video: Path, start: float, end: float) -> layout.Layout:
+    """How to frame a Short: stacked two-shot, speaker tracking, or blurred fill."""
+    return layout.choose(layout.sample_faces(video, start, end))
+
+
+def render(video: Path, out: Path, start: float, end: float, fmt: str, captions: str,
+           frame: layout.Layout | None = None) -> Path:
     """Cut [start, end] and format it.
 
-    Shorts are 1080x1920: cropped to the speaker when one face is clearly on
-    screen, otherwise the full frame over a blurred fill. Long clips are 1920x1080.
-    Audio is normalized to -14 LUFS, the loudness YouTube and TikTok target.
+    Shorts are 1080x1920 using the given layout (see layout.py). Long clips are
+    1920x1080. Audio is normalized to -14 LUFS, the loudness YouTube and TikTok target.
     """
     out.parent.mkdir(parents=True, exist_ok=True)
     subs = out.with_suffix(".ass")
     subs.write_text(captions, encoding="utf-8")
     if fmt == "short":
-        center = face_center(video, start, end)
-        box = crop_box(*_dimensions(video), center) if center is not None else None
-        if box:
-            w, h, x = box
-            graph = f"[0:v]crop={w}:{h}:{x}:0,scale=1080:1920,setsar=1,subtitles={subs.name}[v]"
-        else:
-            graph = (
-                "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg];"
-                "[0:v]scale=1080:-2[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2,subtitles={subs.name}[v]"
-            )
+        width, height = _dimensions(video)
+        graph = layout.filter_graph(frame or plan_layout(video, start, end), width, height, subs.name)
     else:
         graph = (
             "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"

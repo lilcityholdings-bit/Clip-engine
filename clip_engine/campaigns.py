@@ -119,6 +119,7 @@ def describe(campaign: Campaign, video_url: str) -> Source:
         video_url=video_url,
         duration=float(info.get("duration") or 0),
         page=info.get("webpage_url") or video_url,
+        heatmap=info.get("heatmap") or [],
     )
 
 

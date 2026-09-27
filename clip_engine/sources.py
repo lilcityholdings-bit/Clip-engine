@@ -10,7 +10,7 @@ CC0, public domain, CC BY and CC BY-SA. NonCommercial (NC) and
 NoDerivatives (ND) licenses are rejected.
 """
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import requests
 
@@ -62,6 +62,7 @@ class Source:
     video_url: str
     duration: float
     page: str = ""  # link to the original; defaults to the archive.org item page
+    heatmap: list = field(default_factory=list)  # YouTube "most replayed" points, when available
 
     @property
     def page_url(self) -> str:
