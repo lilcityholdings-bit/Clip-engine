@@ -18,6 +18,7 @@ Each clip records the choices behind it: **campaign or topic, format, clip lengt
 
 ### What makes the clips perform
 
+- **Learns from its own results:** once 8 clips have been scored, Claude sees the channel's best and worst clips (real titles, hooks and view counts) every time it picks new moments.
 - **Quality filter:** Claude scores every moment from 1 to 10 for watch-through and shares. Anything under 6 is never posted.
 - **Speaker crop:** Shorts fill the screen with the speaker's face. When there's no single steady face, they fall back to the full frame over a blurred fill.
 - **Word-by-word captions:** the spoken word is highlighted, since most viewers watch on mute.

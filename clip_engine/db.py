@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS clips (
     file_path TEXT,                   -- rendered video, deleted once every post is done
     media_token TEXT,                 -- secret path the file is served at (Instagram fetches it)
     ai_score INTEGER,
+    hook_text TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     views INTEGER,                    -- total across platforms when scored
     subscribers_gained INTEGER,

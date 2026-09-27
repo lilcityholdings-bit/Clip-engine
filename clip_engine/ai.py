@@ -79,6 +79,7 @@ def pick_clips(
     title_style: str,
     count: int,
     rules: str = "",
+    track_record: str = "",
 ) -> list[dict]:
     """Choose the most watchable self-contained moments and write metadata for them.
 
@@ -128,6 +129,11 @@ def pick_clips(
         "shares it. Be harsh: 5 is an average clip, 8+ is rare. Only return moments that "
         "are genuinely strong; returning fewer clips is better than weak ones."
     )
+    if track_record:
+        prompt += (
+            "\n\nHow this channel's past clips actually performed (learn from the winners' "
+            "choice of moment, hook and title; avoid what the losers did):\n" + track_record
+        )
     if rules:
         prompt += f"\n\nThe creator's rules for clips (must follow): {rules}"
     clips = _json_call(client, prompt, schema, effort="high")["clips"]

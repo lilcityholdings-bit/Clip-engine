@@ -376,3 +376,20 @@ def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
     assert pipeline.send_digest(conn, "https://hooks.example/x", http) == 2
     assert "https://tiktok.example/tiktok-1" in http.post.call_args.kwargs["json"]["content"]
     assert pipeline.pending_submissions(conn) == []
+
+
+def test_track_record_feeds_winners_and_losers(conn, tmp_path):
+    assert pipeline.track_record(conn) == ""  # not enough data yet
+    for i in range(10):
+        clip_id, _ = _add_clip(conn, tmp_path)
+        conn.execute("UPDATE clips SET title = ?, hook_text = ?, views = ?, scored_at = datetime('now') WHERE id = ?",
+                     (f"title{i}", f"hook{i}", i * 1000, clip_id))
+    text = pipeline.track_record(conn, n=2)
+    top, worst = text.split("Worst performers:")
+    assert "9,000 views" in top and 'hook "hook9"' in top and "title0" not in top
+    assert "title0" in worst and "title9" not in worst
+
+    client = _claude_returning({"clips": []})
+    ai.pick_clips(client, [], source_title="T", fmt="short", min_sec=20, max_sec=35,
+                  title_style="question", count=1, track_record=text)
+    assert "9,000 views" in client.beta.messages.create.call_args.kwargs["messages"][0]["content"]

@@ -135,6 +135,23 @@ def campaign_job(conn: sqlite3.Connection, live: list[campaigns.Campaign]) -> Jo
 
 # --- shared ----------------------------------------------------------------
 
+def track_record(conn: sqlite3.Connection, n: int = 5, min_scored: int = 8) -> str:
+    """Best and worst scored clips, for Claude to learn from. Empty until there's enough data."""
+    count = conn.execute("SELECT COUNT(*) FROM clips WHERE scored_at IS NOT NULL").fetchone()[0]
+    if count < min_scored:
+        return ""
+
+    def fmt(rows) -> str:
+        return "\n".join(f'- {r["views"]:,} views: title "{r["title"]}", hook "{r["hook_text"] or ""}", '
+                         f'{r["end_sec"] - r["start_sec"]:.0f}s' for r in rows)
+
+    query = ("SELECT title, hook_text, views, start_sec, end_sec FROM clips WHERE scored_at IS NOT NULL"
+             " ORDER BY views {} LIMIT ?")
+    best = conn.execute(query.format("DESC"), (n,)).fetchall()
+    worst = conn.execute(query.format("ASC"), (min(n, count - n) if count > n else 0,)).fetchall()
+    return f"Top performers:\n{fmt(best)}\nWorst performers:\n{fmt(worst)}"
+
+
 def snap_to_words(clip: dict, words: list[dict]) -> dict:
     """Start exactly on the first spoken word and end just after the last, so there's no dead air."""
     inside = [w for w in words if w["start"] >= clip["start"] - 0.3 and w["end"] <= clip["end"] + 0.3]
@@ -193,6 +210,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             claude, segments, source_title=src.title, fmt=arms["format"],
             min_sec=lo, max_sec=hi, title_style=arms["title_style"], count=remaining,
             rules=campaign.rules if campaign else "",
+            track_record=track_record(conn),
         )
         for i, clip in enumerate(clips):
             clip = snap_to_words(clip, words)
@@ -205,10 +223,10 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             )
             cur = conn.execute(
                 "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags,"
-                " arms, file_path, media_token, ai_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " arms, file_path, media_token, ai_score, hook_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (src.identifier, campaign.id if campaign else None, clip["start"], clip["end"], clip["title"],
                  f"{clip['description']}\n\n{job.footer}", json.dumps(clip["tags"]), json.dumps(arms),
-                 str(out), token, clip.get("score")),
+                 str(out), token, clip.get("score"), clip.get("hook_text", "")),
             )
             for platform in platforms:
                 conn.execute("INSERT INTO posts (clip_id, platform, scheduled_at) VALUES (?, ?, ?)",
