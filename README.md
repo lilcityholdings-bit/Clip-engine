@@ -1,76 +1,92 @@
 # Clip Engine
 
-A fully automated clip channel. It runs in one of two modes:
+A fully automated clipping business. It finds long videos, cuts the best moments into Shorts, posts them to **YouTube, TikTok and Instagram Reels**, and learns from views and earnings what to make next.
 
-- **Campaign mode** (the main one): it clips the newest videos of creators who pay per view through clipping programs such as Whop Content Rewards. Joining a program gives you the right to repost that creator's content. The engine learns which campaigns, clip lengths and title styles earn the most, measured as views × pay rate plus subscribers.
-- **Archive mode** (used when no campaigns are set up): it clips public-domain videos from the Internet Archive, as described below.
+## How it works
 
-## Campaign mode
+Every 5 minutes the scheduler checks what needs doing:
 
-1. Join a clipping campaign and read its rules.
-2. Add it to `CAMPAIGNS_JSON`. The format is at the top of `clip_engine/campaigns.py`: pay rate, the creator's channel or Drive links, required caption tags and the creator's rules.
-3. The engine takes each creator's newest videos, has Claude pick moments that follow the creator's rules, and posts them. Each post credits the creator, includes the required tags and adds a paid-promotion disclosure (**#ad**), which the FTC requires for paid clips.
-4. Whop has no API for submitting clips, so the day's new links are sent to `DIGEST_WEBHOOK_URL` (a Discord or Slack channel on your phone) for you to paste into each campaign. Programs that track views by connecting your channel need no submission step at all.
-5. `python -m clip_engine report` shows estimated earnings per campaign.
+| When | What |
+|---|---|
+| Every 3 hours | **Produce:** pick a campaign or topic, get the newest source video, transcribe it, have Claude pick and score the best moments, render them, and queue a post on every platform. |
+| Every 5 minutes | **Publish:** post every queued clip whose scheduled time has arrived, within each platform's daily limit. Failed posts retry 3 times, then send an alert. |
+| Every hour | **Score:** once a clip has been live for 48 hours, add up its views across platforms and update the strategy. Also refreshes view counts and sends new links to submit. |
 
-YouTube often blocks downloads from cloud servers, so prefer campaigns that share raw files through Google Drive or Dropbox links.
+### What it learns
 
-## Archive mode
+Each clip records the choices behind it: **campaign or topic, format, clip length, title style and posting time**. Once the views come in, each choice gets a score. In campaign mode the score is estimated money earned (views × that campaign's pay rate), plus a value for subscribers. The next clip is planned with Thompson sampling, which mostly repeats what earns the most while still testing new options.
 
-Every 6 hours it:
+### What makes the clips perform
 
-1. **Scores** videos that are at least 48 hours old (views and subscribers gained), and feeds the results into its strategy.
-2. **Finds trends** by reading YouTube's trending chart and having Claude turn it into search topics.
-3. **Plans** the next upload, choosing a format (Short or longer clip), clip length, topic and title style. It uses Thompson sampling, so it mostly repeats what earns views and subscribers while still testing new options.
-4. **Sources** a long-form, public-domain or openly licensed video from curated Internet Archive collections.
-5. **Clips** it: transcribes with Whisper, has Claude pick the strongest self-contained moments and write titles, then cuts, reformats and captions them with ffmpeg.
-6. **Uploads** to YouTube with full credit to the original creator and license. It stays under the daily API quota.
+- **Quality filter:** Claude scores every moment from 1 to 10 for watch-through and shares. Anything under 6 is never posted.
+- **Speaker crop:** Shorts fill the screen with the speaker's face. When there's no single steady face, they fall back to the full frame over a blurred fill.
+- **Word-by-word captions:** the spoken word is highlighted, since most viewers watch on mute.
+- **Hook text:** a 2–6 word hook is on screen for the first 3 seconds.
+- **Tight edits:** each cut starts on the first spoken word and ends just after the last, so there's no dead air.
+- **Loudness:** audio is normalized to −14 LUFS.
 
-## Why only licensed sources
+## Source modes
 
-Reposting other creators' videos gets copyright strikes, and the channel is terminated at three. A channel with strikes is also close to worthless to a buyer. So the engine only uses:
+- **Campaign mode** (the main one): clips the newest videos of creators who pay per view through clipping programs such as Whop Content Rewards. Joining a program gives you the right to repost that creator's content. You add each campaign to `CAMPAIGNS_JSON`; the format is at the top of `clip_engine/campaigns.py`. Every post credits the creator, includes the campaign's required tags and carries a paid-promotion disclosure: **#ad** in the caption, plus TikTok's branded-content label. The FTC requires this disclosure.
+- **Archive mode** (used when no campaigns are set up): clips public-domain films from curated Internet Archive collections (Prelinger, feature films, US government films, NASA). Archive licenses elsewhere are set by uploaders and often wrong, so those aren't used. Accepted licenses are public domain, CC0, CC BY and CC BY-SA.
 
-- **Curated collections** (`TRUSTED_COLLECTIONS` in `clip_engine/sources.py`): Prelinger Archives, public-domain feature films, US government films and NASA. Uploader-set licenses elsewhere on archive.org are often wrong, so the engine doesn't use them.
-- **Licenses that allow commercial use and edits:** public domain, CC0, CC BY and CC BY-SA. Anything NonCommercial or NoDerivatives is rejected.
+Whop has no API for submitting clips, so new post links go to `DIGEST_WEBHOOK_URL` (a Discord or Slack channel) and appear on the dashboard, ready to paste. Programs that track views by connecting your accounts need no submission step.
 
-Public-domain films sometimes get wrongly claimed by Content ID. Claims aren't strikes, so dispute them in YouTube Studio if they show up.
+## Dashboard
+
+Open `PUBLIC_BASE_URL` in a browser and sign in with any username and `DASHBOARD_PASSWORD`. It shows:
+
+- estimated earnings and views, per campaign
+- links waiting to be submitted, with a "Mark all submitted" button
+- what the strategy has learned
+- recent clips with per-platform views
+- recent errors
+- **Pause/Resume** and **Make clips now** buttons
+
+Rendered clips are served at `/media/<random token>.mp4` (Instagram fetches them from there) and deleted once they're posted everywhere.
+
+## Deploy (Railway)
+
+1. Create a Railway project called **clip-engine** and deploy this repo. The `Dockerfile` installs ffmpeg and a JavaScript runtime for yt-dlp.
+2. Add a **volume** mounted at `/data`.
+3. **Generate a domain** under Settings → Networking, and put it in `PUBLIC_BASE_URL`.
+4. Set the variables from `.env.example`. Any platform without credentials is simply skipped.
+
+## One-time platform setup
+
+Use company accounts for all of these so the business can be transferred to a buyer.
+
+**YouTube**
+1. Create the channel as a **Brand Account** under the company Google account.
+2. In Google Cloud Console: enable **YouTube Data API v3** and **YouTube Analytics API**, set up the OAuth consent screen (External) and **publish** it, then create an OAuth client of type *Desktop app*.
+3. Run `python scripts/get_youtube_token.py` and put the three printed values into Railway.
+4. Apply for the **YouTube API audit** ("YouTube API Services - Audit and Quota Extension"). Until the project passes, API uploads are locked to private.
+
+**TikTok**
+1. On developers.tiktok.com, create an app with the **Content Posting API** (Direct Post), and request the scopes `video.publish` and `video.list`.
+2. Authorize your TikTok account once to get a refresh token. Tokens are then refreshed automatically.
+3. Submit the app for **audit**. Until it passes, posts are private (`TIKTOK_PRIVACY=SELF_ONLY`).
+
+**Instagram**
+1. Switch the Instagram account to a **professional** (Business or Creator) account.
+2. On developers.facebook.com, create an app using **Instagram API with Instagram Login**, with `instagram_business_basic` and `instagram_business_content_publish`.
+3. Generate a long-lived token and put it and the account's user ID into Railway. The engine refreshes the token weekly.
+4. Submit for **App Review** to post on accounts other than the app's testers.
 
 ## Run locally
 
 ```bash
 pip install -r requirements.txt          # also needs ffmpeg installed
 cp .env.example .env                     # fill in values, then export them
-python -m clip_engine produce            # one find → clip → upload cycle
-python -m clip_engine score              # score old uploads
-python -m clip_engine report             # what the strategy has learned
+python -m clip_engine run                # dashboard + scheduler
+python -m clip_engine produce            # one production cycle
+python -m clip_engine publish            # post whatever is due
+python -m clip_engine report             # strategy, earnings, links to submit
 python -m pytest                         # tests
 ```
 
-## Deploy (Railway)
-
-1. Create a Railway project called **clip-engine** and deploy this repo. The `Dockerfile` installs ffmpeg.
-2. Add a **volume** mounted at `/data`, which holds the database and temporary video files.
-3. Set the variables from `.env.example`.
-4. The service runs `python -m clip_engine run` forever.
-
-## One-time YouTube setup
-
-1. Create the channel as a **Brand Account** under the company Google account. A Brand Account can be transferred to a buyer.
-2. In Google Cloud Console (same company account): create a project, enable **YouTube Data API v3** and **YouTube Analytics API**, set up the OAuth consent screen, and create an OAuth client of type *Desktop app*.
-3. Run `python scripts/get_youtube_token.py` and sign in as the channel. Copy the three printed values into Railway.
-4. **Request an API audit.** Until the Google Cloud project passes YouTube's API compliance audit, videos uploaded through the API are locked to private. Apply using the "YouTube API Services - Audit and Quota Extension" form. The same form raises the upload limit: the default quota allows about 6 uploads a day.
-
 ## Costs
 
-- **Claude API:** about 2 calls per cycle, a few cents each.
-- **Railway:** one small worker, plus a volume of about 5 GB.
-- **YouTube API:** free within quota.
-
-## What makes the clips perform
-
-- **Speaker crop:** Shorts crop full-screen to the speaker when one face is steady on screen. Otherwise they fall back to the full frame over a blurred fill.
-- **Word-by-word captions:** the spoken word is highlighted in yellow, since most viewers watch on mute.
-- **Hook text:** a 2–6 word hook sits on screen for the first 3 seconds to stop the scroll.
-- **Quality filter:** Claude scores each moment from 1 to 10 for how likely people are to watch it to the end and share it. Anything under 6 is never posted, because weak clips drag down the whole channel.
-- **Loudness:** audio is normalized to −14 LUFS, the level YouTube and TikTok play at.
-- **Failure alerts:** if a cycle fails, a message goes to `DIGEST_WEBHOOK_URL`, and the engine retries on the next cycle.
+- **Claude API:** 2–3 calls per production cycle, a few cents each.
+- **Railway:** one worker with about 2 GB of RAM (Whisper and ffmpeg), plus a 10 GB volume.
+- **Platform APIs:** free within their limits.

@@ -1,5 +1,6 @@
 import json
 import random
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -185,32 +186,120 @@ def test_trend_topics_without_trends_uses_evergreen():
 
 # --- pipeline ------------------------------------------------------------
 
+class FakePub:
+    def __init__(self, name, limit=10, fail=False):
+        self.name, self.daily_limit, self.fail = name, limit, fail
+        self.published, self.views_by_id = [], {}
+
+    def publish(self, clip, path, public_url):
+        if self.fail:
+            raise RuntimeError("platform down")
+        self.published.append((clip, path, public_url))
+        vid = f"{self.name}-{len(self.published)}"
+        return vid, f"https://{self.name}.example/{vid}"
+
+    def stats(self, ids):
+        return {i: self.views_by_id.get(i, (0, 0)) for i in ids}
+
+
+def _add_clip(conn, tmp_path, arms=None, campaign=None, scheduled="datetime('now', '-1 minute')"):
+    conn.execute("INSERT OR IGNORE INTO sources VALUES ('s', 't', 'c', 'l', 'u', 'x', NULL)")
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"video")
+    cur = conn.execute(
+        "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms,"
+        " file_path, media_token) VALUES ('s', ?, 0, 30, 'T', 'D', '[\"a\"]', ?, ?, 'ab' )",
+        (campaign, json.dumps(arms or {"format": "short", "topic": "space"}), str(f)))
+    return cur.lastrowid, f
+
+
 def test_produce_respects_daily_limit(conn, tmp_path):
-    settings = Settings(data_dir=tmp_path, max_uploads_per_day=1)
-    conn.execute("INSERT INTO sources VALUES ('s', 't', 'c', 'l', 'u', 'x', NULL)")
-    conn.execute("INSERT INTO uploads (video_id, source_identifier, start_sec, end_sec, title, arms)"
-                 " VALUES ('v', 's', 0, 1, 't', '{}')")
-    yt, claude = MagicMock(), MagicMock()
-    assert pipeline.produce(conn, settings, claude, yt, 2) == 0
-    yt.upload.assert_not_called()
+    settings = Settings(data_dir=tmp_path, max_clips_per_day=1)
+    _add_clip(conn, tmp_path)
+    claude = MagicMock()
+    assert pipeline.produce(conn, settings, claude, None, {"youtube": FakePub("youtube")}, 2) == 0
+    claude.beta.messages.create.assert_not_called()
 
 
-def test_score_updates_strategy(conn, tmp_path):
+def test_produce_needs_a_platform(conn, tmp_path):
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), MagicMock(), None, {}, 2) == 0
+
+
+def test_publish_due_posts_everywhere_then_deletes_file(conn, tmp_path):
+    settings = Settings(data_dir=tmp_path, public_base_url="https://engine.example")
+    clip_id, f = _add_clip(conn, tmp_path)
+    for p in ("youtube", "tiktok"):
+        conn.execute("INSERT INTO posts (clip_id, platform, scheduled_at) VALUES (?, ?, datetime('now', '-1 minute'))",
+                     (clip_id, p))
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.publish_due(conn, settings, pubs) == 2
+    assert pubs["tiktok"].published[0][2] == "https://engine.example/media/ab.mp4"
+    assert pubs["tiktok"].published[0][0]["title"] == "T"
+    assert not f.exists()
+    assert conn.execute("SELECT file_path FROM clips").fetchone()[0] is None
+
+
+def test_publish_waits_for_scheduled_time_and_daily_limit(conn, tmp_path):
+    settings = Settings(data_dir=tmp_path)
+    clip_id, f = _add_clip(conn, tmp_path)
+    conn.execute("INSERT INTO posts (clip_id, platform, scheduled_at) VALUES (?, 'youtube', datetime('now', '+2 hours'))",
+                 (clip_id,))
+    pub = FakePub("youtube")
+    assert pipeline.publish_due(conn, settings, {"youtube": pub}) == 0
+    assert f.exists()  # still queued, file kept
+    conn.execute("UPDATE posts SET scheduled_at = datetime('now', '-1 minute')")
+    pub.daily_limit = 0
+    assert pipeline.publish_due(conn, settings, {"youtube": pub}) == 0
+
+
+def test_publish_retries_then_gives_up(conn, tmp_path):
+    settings = Settings(data_dir=tmp_path)
+    clip_id, _ = _add_clip(conn, tmp_path)
+    conn.execute("INSERT INTO posts (clip_id, platform, scheduled_at) VALUES (?, 'tiktok', datetime('now', '-1 minute'))",
+                 (clip_id,))
+    pub = FakePub("tiktok", fail=True)
+    for attempt in range(pipeline.MAX_ATTEMPTS):
+        pipeline.publish_due(conn, settings, {"tiktok": pub})
+        conn.execute("UPDATE posts SET scheduled_at = datetime('now', '-1 minute')")
+    row = conn.execute("SELECT status, attempts, error FROM posts").fetchone()
+    assert (row["status"], row["attempts"]) == ("failed", pipeline.MAX_ATTEMPTS)
+    assert "platform down" in row["error"]
+
+
+def test_score_sums_views_across_platforms(conn, tmp_path):
     settings = Settings(data_dir=tmp_path, score_after_hours=48)
-    conn.execute("INSERT INTO sources VALUES ('s', 't', 'c', 'l', 'u', 'x', NULL)")
-    arms = json.dumps({"format": "short", "topic": "space"})
-    conn.execute("INSERT INTO uploads (video_id, source_identifier, start_sec, end_sec, title, arms, uploaded_at)"
-                 " VALUES ('old', 's', 0, 1, 't', ?, datetime('now', '-3 days'))", (arms,))
-    conn.execute("INSERT INTO uploads (video_id, source_identifier, start_sec, end_sec, title, arms)"
-                 " VALUES ('new', 's', 0, 1, 't', ?)", (arms,))
-    yt = MagicMock()
-    yt.performance.return_value = {"old": (500, 3)}
-    assert pipeline.score(conn, settings, yt) == 1
-    assert yt.performance.call_args.args[0] == ["old"]
+    clip_id, _ = _add_clip(conn, tmp_path)
+    fresh_id, _ = _add_clip(conn, tmp_path)
+    conn.executemany(
+        "INSERT INTO posts (clip_id, platform, status, scheduled_at, external_id, posted_at)"
+        " VALUES (?, ?, 'posted', datetime('now'), ?, ?)",
+        [(clip_id, "youtube", "y1", "2020-01-01 00:00:00"), (clip_id, "tiktok", "t1", "2020-01-01 00:00:00"),
+         (fresh_id, "youtube", "y2", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))])
+    yt, tt = FakePub("youtube"), FakePub("tiktok")
+    yt.views_by_id = {"y1": (500, 3)}
+    tt.views_by_id = {"t1": (1500, 0)}
+    assert pipeline.score(conn, settings, {"youtube": yt, "tiktok": tt}) == 1
+    row = conn.execute("SELECT views, subscribers_gained FROM clips WHERE id = ?", (clip_id,)).fetchone()
+    assert tuple(row) == (2000, 3)
     board = {(r["dimension"], r["arm"]): r for r in strategy.leaderboard(conn)}
     assert board[("topic", "space")]["n"] == 1
-    row = conn.execute("SELECT views, subscribers_gained FROM uploads WHERE video_id='old'").fetchone()
-    assert tuple(row) == (500, 3)
+    assert pytest.approx(board[("topic", "space")]["mean"]) == strategy.reward(2000, 3)
+
+
+def test_snap_to_words_removes_dead_air():
+    words = [{"start": 2.0, "end": 2.4, "word": "a"}, {"start": 9.0, "end": 9.5, "word": "b"},
+             {"start": 20.0, "end": 20.4, "word": "c"}]
+    clip = pipeline.snap_to_words({"start": 1.0, "end": 12.0}, words)
+    assert clip["start"] == pytest.approx(1.95) and clip["end"] == pytest.approx(9.75)
+
+
+def test_next_slot():
+    from datetime import timezone
+    from clip_engine.platforms import next_slot
+    now = datetime(2026, 1, 1, 15, 30, tzinfo=timezone.utc)
+    assert next_slot(19, now) == datetime(2026, 1, 1, 19, 0, tzinfo=timezone.utc)
+    assert next_slot(15, now) == now                      # inside the hour: post now
+    assert next_slot(13, now) == datetime(2026, 1, 2, 13, 0, tzinfo=timezone.utc)
 
 
 # --- campaigns -----------------------------------------------------------
@@ -243,36 +332,47 @@ def test_campaign_reward_uses_pay_rate():
 
 
 def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
-    monkeypatch.setenv("CAMPAIGNS_JSON", json.dumps([CAMPAIGN]))
-    settings = Settings(data_dir=tmp_path, max_uploads_per_day=5)
+    monkeypatch.setenv("CAMPAIGNS_JSON", json.dumps([{**CAMPAIGN, "platforms": ["youtube", "tiktok"]}]))
+    settings = Settings(data_dir=tmp_path)
     src = sources.Source("https://youtu.be/ep1", "Ep 1", "Pod Host", CAMPAIGN["program_url"],
                          "https://youtu.be/ep1", 3600, page="https://youtu.be/ep1")
     monkeypatch.setattr(campaigns, "latest_videos", lambda url: ["https://youtu.be/ep1"])
     monkeypatch.setattr(campaigns, "describe", lambda c, url: src)
     monkeypatch.setattr(campaigns, "download", lambda url, dest: dest)
-    monkeypatch.setattr(media, "transcribe", lambda v, m: ([{"start": 0, "end": 50, "text": "hi"}], []))
-    monkeypatch.setattr(media, "render", lambda video, out, *a: out)
+    words = [{"start": 1.0 + i, "end": 1.5 + i, "word": f" w{i}"} for i in range(40)]
+    monkeypatch.setattr(media, "transcribe", lambda v, m: ([{"start": 0, "end": 50, "text": "hi"}], words))
+
+    def fake_render(video, out, *a):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"clip")
+        return out
+    monkeypatch.setattr(media, "render", fake_render)
     captured_hooks = []
     real_captions = media.captions_ass
     monkeypatch.setattr(media, "captions_ass",
                         lambda w, s, e, f, hook="": captured_hooks.append(hook) or real_captions(w, s, e, f, hook))
     claude = _claude_returning({"clips": [
-        {"start": 0, "end": 36, "title": "Clip", "description": "desc", "tags": ["a"], "hook_text": "Wait for it", "score": 8, "why": ""}]})
-    yt = MagicMock()
-    yt.upload.return_value = "vid1"
+        {"start": 1, "end": 37, "title": "Clip", "description": "desc", "tags": ["a"], "hook_text": "Wait for it",
+         "score": 8, "why": ""}]})
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok"), "instagram": FakePub("instagram")}
 
-    assert pipeline.produce(conn, settings, claude, yt, 2) == 1
-    title, description, tags = yt.upload.call_args.args[1:]
-    assert "#ad" in description and "@pod #pod" in description
-    assert "No sponsor reads." in claude.beta.messages.create.call_args.kwargs["messages"][0]["content"]
-    row = conn.execute("SELECT campaign_id, arms FROM uploads").fetchone()
-    assert row["campaign_id"] == "pod" and json.loads(row["arms"])["campaign"] == "pod"
-    # the same video is never clipped twice
-    assert pipeline.produce(conn, settings, claude, yt, 2) == 0
-
-    http = MagicMock()
-    assert pipeline.send_digest(conn, "https://hooks.example/x", http) == 1
-    assert "https://youtu.be/vid1" in http.post.call_args.kwargs["json"]["content"]
+    assert pipeline.produce(conn, settings, claude, None, pubs, 2) == 1
     assert captured_hooks == ["Wait for it"]
+    assert "No sponsor reads." in claude.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+    clip = conn.execute("SELECT * FROM clips").fetchone()
+    assert clip["campaign_id"] == "pod" and json.loads(clip["arms"])["campaign"] == "pod"
+    assert "#ad" in clip["description"] and "@pod #pod" in clip["description"]
+    # only the platforms the campaign pays for
+    assert sorted(r[0] for r in conn.execute("SELECT platform FROM posts")) == ["tiktok", "youtube"]
+    # the same video is never clipped twice
+    assert pipeline.produce(conn, settings, claude, None, pubs, 2) == 0
+
+    conn.execute("UPDATE posts SET scheduled_at = datetime('now', '-1 minute')")
+    assert pipeline.publish_due(conn, settings, pubs) == 2
+    conn.execute("UPDATE posts SET views = 1000")
+    assert pipeline.earnings(conn, settings)[0] == {"campaign": "pod", "clips": 1, "posts": 2, "views": 2000,
+                                                    "estimated_usd": 4.0}
+    http = MagicMock()
+    assert pipeline.send_digest(conn, "https://hooks.example/x", http) == 2
+    assert "https://tiktok.example/tiktok-1" in http.post.call_args.kwargs["json"]["content"]
     assert pipeline.pending_submissions(conn) == []
-    assert pipeline.earnings(conn, settings)[0]["campaign"] == "pod"

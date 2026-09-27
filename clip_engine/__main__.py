@@ -1,10 +1,10 @@
 """Entry point.
 
-python -m clip_engine run      # run forever (what Railway runs)
-python -m clip_engine produce  # one production cycle
-python -m clip_engine score    # one scoring cycle
-python -m clip_engine report   # what the strategy has learned, earnings, links to submit
-python -m clip_engine submitted all|VIDEO_ID...  # mark campaign links as submitted
+python -m clip_engine run        # run forever: dashboard + scheduler (what Railway runs)
+python -m clip_engine produce    # one production cycle
+python -m clip_engine publish    # post everything that's due
+python -m clip_engine score      # one scoring cycle
+python -m clip_engine report     # what the strategy has learned, earnings, links to submit
 """
 import logging
 import sys
@@ -12,22 +12,52 @@ import time
 
 import anthropic
 
-from . import pipeline, strategy
+from . import dashboard, db, pipeline, platforms, strategy
 from .config import Settings
-from .db import connect
 from .youtube import YouTube
 
-CYCLE_HOURS = 6
+TICK_MINUTES = 5
+PRODUCE_EVERY_HOURS = 3
+SCORE_EVERY_HOURS = 1
 CLIPS_PER_CYCLE = 2
 
 log = logging.getLogger("clip_engine")
+
+
+def due(conn, key: str, every_hours: float) -> bool:
+    """True (and records the run) if the task hasn't run in the last every_hours."""
+    last = float(db.get(conn, key, "0"))
+    if time.time() - last < every_hours * 3600:
+        return False
+    db.put(conn, key, str(time.time()))
+    return True
+
+
+def tick(conn, settings: Settings, claude, yt, pubs) -> None:
+    """One pass of the scheduler. Every step is isolated so one failure doesn't stop the rest."""
+    if db.get(conn, "paused") == "1":
+        return
+    steps = [("publish", lambda: pipeline.publish_due(conn, settings, pubs))]
+    if due(conn, "last_score", SCORE_EVERY_HOURS):
+        steps += [("score", lambda: pipeline.score(conn, settings, pubs)),
+                  ("views", lambda: pipeline.refresh_views(conn, pubs)),
+                  ("digest", lambda: pipeline.send_digest(conn, settings.digest_webhook_url))]
+    if db.get(conn, "run_now") == "1" or due(conn, "last_produce", PRODUCE_EVERY_HOURS):
+        db.put(conn, "run_now", "0")
+        steps.append(("produce", lambda: pipeline.produce(conn, settings, claude, yt, pubs, CLIPS_PER_CYCLE)))
+    for name, fn in steps:
+        try:
+            fn()
+        except Exception as exc:
+            log.exception("%s failed; will retry later", name)
+            pipeline.notify(settings.digest_webhook_url, f"clip-engine: {name} failed and will retry: {exc!r}")
 
 
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     command = argv[1] if len(argv) > 1 else "run"
     settings = Settings()
-    conn = connect(settings.db_path)
+    conn = db.connect(settings.db_path)
 
     if command == "report":
         print("What works (higher score = more views/earnings):")
@@ -38,32 +68,24 @@ def main(argv: list[str]) -> int:
             print(f"  {row['campaign']:24} posts={row['posts']:<4} views={row['views']:<9} ${row['estimated_usd']}")
         print("\nLinks to submit:")
         for row in pipeline.pending_submissions(conn):
-            print(f"  [{row['campaign_id']}] {row['url']}  {row['title']}")
-        return 0
-    if command == "submitted":
-        ids = [r["video_id"] for r in pipeline.pending_submissions(conn)] if argv[2:] == ["all"] else argv[2:]
-        pipeline.mark_submitted(conn, ids)
-        print(f"marked {len(ids)} as submitted")
+            print(f"  [{row['campaign_id']}] {row['platform']:9} {row['url']}  {row['title']}")
         return 0
 
     claude = anthropic.Anthropic()
-    yt = YouTube(settings)
+    yt = YouTube(settings) if settings.youtube_refresh_token else None
+    pubs = platforms.enabled(settings, conn, yt)
+    log.info("publishing to: %s", ", ".join(pubs) or "nothing yet (no platform credentials)")
     if command == "produce":
-        pipeline.produce(conn, settings, claude, yt, CLIPS_PER_CYCLE)
+        pipeline.produce(conn, settings, claude, yt, pubs, CLIPS_PER_CYCLE)
+    elif command == "publish":
+        pipeline.publish_due(conn, settings, pubs)
     elif command == "score":
-        pipeline.score(conn, settings, yt)
+        pipeline.score(conn, settings, pubs)
     elif command == "run":
+        dashboard.start(settings)
         while True:
-            for step, fn in (("score", lambda: pipeline.score(conn, settings, yt)),
-                             ("produce", lambda: pipeline.produce(conn, settings, claude, yt, CLIPS_PER_CYCLE)),
-                             ("digest", lambda: pipeline.send_digest(conn, settings.digest_webhook_url))):
-                try:
-                    fn()
-                except Exception as exc:
-                    log.exception("%s cycle failed; will retry next cycle", step)
-                    pipeline.notify(settings.digest_webhook_url,
-                                    f"clip-engine: {step} cycle failed and will retry in {CYCLE_HOURS}h: {exc!r}")
-            time.sleep(CYCLE_HOURS * 3600)
+            tick(conn, settings, claude, yt, pubs)
+            time.sleep(TICK_MINUTES * 60)
     else:
         print(__doc__)
         return 2

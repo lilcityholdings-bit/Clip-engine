@@ -8,6 +8,10 @@ Every external account and dependency this product relies on. Keep it current, b
 | YouTube channel (Brand Account) | Where clips are published | Company Google account (TBD) | Add new primary owner, then remove old owner |
 | Google Cloud project | YouTube API credentials and quota | Company Google account (TBD) | IAM: add buyer as Owner |
 | Anthropic API key | Picks clips and writes titles | Company Anthropic org (TBD) | Buyer issues their own key |
+| TikTok account + TikTok developer app | Posting clips (Content Posting API) | Company account (TBD) | Transfer account login; buyer re-authorizes the app |
+| Instagram professional account + Meta app | Posting Reels | Company Meta Business account (TBD) | Transfer via Meta Business Suite |
+| Discord/Slack webhook | Links to submit and failure alerts | Company workspace (TBD) | Buyer creates their own webhook |
+| Clipping program memberships (e.g. Whop) | Paid campaigns and payouts | Company account (TBD) | Buyer rejoins programs; payouts to company bank account |
 | Railway project `clip-engine` | Hosting, plus a volume for the database | Company Railway account (TBD) | Railway project transfer |
 
 ## Content sources and licenses

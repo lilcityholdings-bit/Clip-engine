@@ -7,4 +7,5 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY clip_engine ./clip_engine
+EXPOSE 8080
 CMD ["python", "-m", "clip_engine", "run"]

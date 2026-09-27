@@ -12,7 +12,13 @@ class Settings:
     youtube_refresh_token: str = field(default_factory=lambda: os.environ.get("YOUTUBE_REFRESH_TOKEN", ""))
     youtube_api_key: str = field(default_factory=lambda: os.environ.get("YOUTUBE_API_KEY", ""))
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("DATA_DIR", "./data")))
+    # YouTube's default API quota allows about 6 uploads a day.
     max_uploads_per_day: int = field(default_factory=lambda: int(os.environ.get("MAX_UPLOADS_PER_DAY", "5")))
+    max_clips_per_day: int = field(default_factory=lambda: int(os.environ.get("MAX_CLIPS_PER_DAY", "6")))
+    # Public address of this service (Railway domain); Instagram fetches clips from here.
+    public_base_url: str = field(default_factory=lambda: os.environ.get("PUBLIC_BASE_URL", "").rstrip("/"))
+    dashboard_password: str = field(default_factory=lambda: os.environ.get("DASHBOARD_PASSWORD", ""))
+    port: int = field(default_factory=lambda: int(os.environ.get("PORT", "8080")))
     privacy_status: str = field(default_factory=lambda: os.environ.get("PRIVACY_STATUS", "public"))
     trend_region: str = field(default_factory=lambda: os.environ.get("TREND_REGION", "US"))
     score_after_hours: int = field(default_factory=lambda: int(os.environ.get("SCORE_AFTER_HOURS", "48")))

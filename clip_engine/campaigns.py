@@ -14,6 +14,7 @@ DATA_DIR), one object per campaign you've been accepted into:
     "caption_required": "@somepodcast #somepodcast",  # must appear in every post
     "rules": "No clips of sponsor reads. Keep profanity bleeped.",
     "formats": ["short"],
+    "platforms": ["youtube", "tiktok", "instagram"],  # where the program pays for views
     "active": true,
     "ends_on": "2026-12-31"
   }
@@ -48,6 +49,7 @@ class Campaign:
     caption_required: str = ""
     rules: str = ""
     formats: list[str] = field(default_factory=lambda: ["short"])
+    platforms: list[str] = field(default_factory=lambda: ["youtube", "tiktok", "instagram"])
     active: bool = True
     ends_on: str | None = None
 
@@ -74,10 +76,26 @@ def by_id(campaigns: list[Campaign]) -> dict[str, Campaign]:
     return {c.id: c for c in campaigns}
 
 
+def _cookie_file() -> str | None:
+    """YouTube often blocks cloud servers; cookies from a signed-in browser (YTDLP_COOKIES,
+    Netscape cookies.txt contents) get past the "confirm you're not a bot" check."""
+    cookies = os.environ.get("YTDLP_COOKIES")
+    if not cookies:
+        return None
+    path = Path(os.environ.get("DATA_DIR", "./data")) / "yt-cookies.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(cookies)
+    return str(path)
+
+
 def _ydl(opts: dict):
     import yt_dlp  # only needed in campaign mode
 
-    return yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, **opts})
+    base = {"quiet": True, "no_warnings": True, "retries": 5, "fragment_retries": 5}
+    cookie_file = _cookie_file()
+    if cookie_file:
+        base["cookiefile"] = cookie_file
+    return yt_dlp.YoutubeDL({**base, **opts})
 
 
 def latest_videos(url: str) -> list[str]:

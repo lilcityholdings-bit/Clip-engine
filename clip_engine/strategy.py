@@ -18,6 +18,8 @@ LENGTHS = {
     "short": ["20-35", "35-58"],
     "long": ["120-300", "300-600"],
 }
+# Posting hours (UTC) to test: 9am, noon, 3pm, 6pm and 9pm US Eastern.
+POST_HOURS = ["13", "16", "19", "22", "1"]
 SUBSCRIBER_WEIGHT = 50  # one subscriber is worth about 50 views
 SUBSCRIBER_CENTS = 5    # in campaign mode, a subscriber is worth about 5 cents of future payouts
 PRIOR_SD = 2.0
@@ -70,6 +72,7 @@ def plan(conn: sqlite3.Connection, subjects: list[str], rng: random.Random | Non
         "format": fmt,
         "length": choose(conn, "length", [f"{fmt}:{r}" for r in LENGTHS[fmt]], rng),
         "title_style": choose(conn, "title_style", TITLE_STYLES, rng),
+        "post_hour": choose(conn, "post_hour", POST_HOURS, rng),
     }
 
 
