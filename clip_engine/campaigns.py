@@ -15,6 +15,8 @@ DATA_DIR), one object per campaign you've been accepted into:
     "rules": "No clips of sponsor reads. Keep profanity bleeped.",
     "formats": ["short"],
     "platforms": ["youtube", "tiktok", "instagram"],  # where the program pays for views
+    "niche": "business and money podcast",            # used to research what's trending
+    "allow_music": true,                              # false if the program bans added music
     "active": true,
     "ends_on": "2026-12-31"
   }
@@ -50,6 +52,8 @@ class Campaign:
     rules: str = ""
     formats: list[str] = field(default_factory=lambda: ["short"])
     platforms: list[str] = field(default_factory=lambda: ["youtube", "tiktok", "instagram"])
+    niche: str = ""           # what the creator's content is about, for trend research
+    allow_music: bool = True  # False if the program forbids adding background music
     active: bool = True
     ends_on: str | None = None
 

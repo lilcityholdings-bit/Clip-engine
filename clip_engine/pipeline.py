@@ -17,7 +17,7 @@ from pathlib import Path
 
 import anthropic
 
-from . import ai, campaigns, media, moments, sources, strategy
+from . import ai, campaigns, media, moments, sources, strategy, trends
 from .config import Settings
 from .db import clips_today, posts_today
 from .platforms import PublishError, next_slot
@@ -81,8 +81,9 @@ def find_archive_source(conn: sqlite3.Connection, topic: str) -> sources.Source 
     return None
 
 
-def archive_job(conn: sqlite3.Connection, claude: anthropic.Anthropic, yt: YouTube | None) -> Job | None:
-    arms = strategy.plan(conn, candidate_topics(conn, claude, yt))
+def archive_job(conn: sqlite3.Connection, claude: anthropic.Anthropic, yt: YouTube | None,
+                music: list[str] | None = None) -> Job | None:
+    arms = strategy.plan(conn, candidate_topics(conn, claude, yt), music=music)
     src = find_archive_source(conn, arms["topic"])
     for fallback in ai.EVERGREEN_TOPICS:
         if src:
@@ -118,13 +119,15 @@ def find_campaign_source(conn: sqlite3.Connection, campaign: campaigns.Campaign)
     return None
 
 
-def campaign_job(conn: sqlite3.Connection, live: list[campaigns.Campaign]) -> Job | None:
+def campaign_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
+                 music: list[str] | None = None) -> Job | None:
     remaining = list(live)
     while remaining:
         ids = [c.id for c in remaining]
         campaign = campaigns.by_id(remaining)[strategy.choose(conn, "campaign", ids)]
         formats = [f for f in campaign.formats if f in strategy.FORMATS] or ["short"]
-        arms = strategy.plan(conn, [campaign.id], subject_dim="campaign", formats=formats)
+        arms = strategy.plan(conn, [campaign.id], subject_dim="campaign", formats=formats,
+                             music=music if campaign.allow_music else None)
         src = find_campaign_source(conn, campaign)
         if src:
             return Job(arms, src, campaigns.caption_lines(campaign, src, arms["format"]), campaign)
@@ -152,6 +155,19 @@ def track_record(conn: sqlite3.Connection, n: int = 5, min_scored: int = 8) -> s
     return f"Top performers:\n{fmt(best)}\nWorst performers:\n{fmt(worst)}"
 
 
+def niche_of(campaign: campaigns.Campaign | None, arms: dict) -> str:
+    if campaign:
+        return campaign.niche or campaign.name
+    return arms.get("topic", "education")
+
+
+def compose_description(clip: dict, footer: str) -> str:
+    """Clip description, then its hashtags, then credit and disclosure."""
+    tags = " ".join(t if t.startswith("#") else f"#{t}" for t in clip.get("hashtags", [])[:5]
+                    if t.strip("# ") and " " not in t.strip())
+    return "\n\n".join(part for part in (clip["description"], tags, footer) if part)
+
+
 def snap_to_words(clip: dict, words: list[dict]) -> dict:
     """Start exactly on the first spoken word and end just after the last, so there's no dead air."""
     inside = [w for w in words if w["start"] >= clip["start"] - 0.3 and w["end"] <= clip["end"] + 0.3]
@@ -173,7 +189,9 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
         return 0
 
     live = campaigns.live(campaigns.load(settings.data_dir))
-    job = campaign_job(conn, live) if live else archive_job(conn, claude, yt)
+    library = media.music_library(settings.data_dir)
+    tracks = sorted(library)
+    job = campaign_job(conn, live, tracks) if live else archive_job(conn, claude, yt, tracks)
     if not job:
         log.warning("no usable source found")
         return 0
@@ -214,6 +232,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             min_sec=lo, max_sec=hi, title_style=arms["title_style"], count=remaining,
             rules=campaign.rules if campaign else "",
             track_record=track_record(conn),
+            trends=trends.as_prompt(trends.brief(conn, claude, niche_of(campaign, arms), settings.trend_region)),
         )
         for i, clip in enumerate(clips):
             if not moments.same_window(clip, segments):
@@ -229,12 +248,13 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                 media.captions_ass(words, clip["start"], clip["end"], arms["format"], clip.get("hook_text", ""),
                                    center=bool(frame and frame.kind == "stack")),
                 frame=frame,
+                music=library.get(arms.get("music", "none")),
             )
             cur = conn.execute(
                 "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags,"
                 " arms, file_path, media_token, ai_score, hook_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (src.identifier, campaign.id if campaign else None, clip["start"], clip["end"], clip["title"],
-                 f"{clip['description']}\n\n{job.footer}", json.dumps(clip["tags"]), json.dumps(arms),
+                 compose_description(clip, job.footer), json.dumps(clip["tags"]), json.dumps(arms),
                  str(out), token, clip.get("score"), clip.get("hook_text", "")),
             )
             for platform in platforms:
@@ -254,7 +274,7 @@ def publish_due(conn: sqlite3.Connection, settings: Settings, publishers: dict) 
     """Post every queued clip whose time has come. Returns the number posted."""
     due = conn.execute(
         "SELECT p.id AS post_id, p.platform, p.attempts, c.id AS clip_id, c.title, c.description, c.tags,"
-        " c.campaign_id, c.file_path, c.media_token FROM posts p JOIN clips c ON c.id = p.clip_id"
+        " c.campaign_id, c.file_path, c.media_token, c.arms FROM posts p JOIN clips c ON c.id = p.clip_id"
         " WHERE p.status = 'queued' AND p.scheduled_at <= datetime('now') ORDER BY p.scheduled_at"
     ).fetchall()
     posted = 0

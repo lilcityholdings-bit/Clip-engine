@@ -254,6 +254,10 @@ class AyrsharePublisher:
             body["post"] = clip["description"][:5000]
         elif self.name == "tiktok":
             body["tikTokOptions"] = {"isBrandedContent": paid, "thumbNailOffset": 1000}
+            # TikTok's own licensed recommended music, only when we didn't add a bed ourselves.
+            arms = json.loads(clip.get("arms") or "{}")
+            if os.environ.get("TIKTOK_AUTO_MUSIC") == "1" and arms.get("music", "none") == "none":
+                body["tikTokOptions"]["autoAddMusic"] = True
         data = self._post("post", body)
         results = [r for r in data.get("postIds", []) if r.get("platform") == self.name]
         if data.get("status") != "success" or not results or results[0].get("status") != "success":

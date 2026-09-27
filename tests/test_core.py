@@ -339,8 +339,11 @@ def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(media, "plan_layout", lambda v, s, e: layout.Layout("stack", left=0.3, right=0.7))
     centers = []
 
-    def fake_render(video, out, *a, frame=None):
+    rendered_music = []
+
+    def fake_render(video, out, *a, frame=None, music=None):
         centers.append(frame.kind)
+        rendered_music.append(music)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"clip")
         return out
@@ -352,18 +355,30 @@ def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
                         or real_captions(w, s, e, f, hook, center))
     claude = _claude_returning({"clips": [
         {"start": 1, "end": 37, "title": "Clip", "description": "desc", "tags": ["a"], "hook_text": "Wait for it",
-         "score": 8, "why": ""}]})
+         "hashtags": ["#podcast", "money", "not a tag"], "score": 8, "why": ""}]})
     pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok"), "instagram": FakePub("instagram")}
+    (tmp_path / "music").mkdir()
+    (tmp_path / "music" / "lofi-beat.mp3").write_bytes(b"x")
+    from clip_engine import trends
+    niches = []
+    monkeypatch.setattr(trends, "brief", lambda conn, client, niche, geo: niches.append(niche) or {
+        "hashtags": ["#moneytok"], "phrases": ["it's giving"], "title_patterns": [], "notes": "", "sounds": []})
 
     assert pipeline.produce(conn, settings, claude, None, pubs, 2) == 1
+    assert niches == ["Pod clips"]
+    chosen_music = json.loads(conn.execute("SELECT arms FROM clips").fetchone()[0])["music"]
+    assert chosen_music in ("none", "lofi-beat")
+    assert rendered_music == [None if chosen_music == "none" else tmp_path / "music" / "lofi-beat.mp3"]
     assert captured_hooks == [("Wait for it", True)]  # two-person layout puts captions on the seam
     assert centers == ["stack"]
     assert seen_windows == [[(0.0, 175.0)]]  # transcribed around the most replayed peak
     prompt = claude.beta.messages.create.call_args.kwargs["messages"][0]["content"]
     assert "No sponsor reads." in prompt and "<MOST REPLAYED, LOUD>" in prompt
+    assert "Trending hashtags: #moneytok" in prompt and "it's giving" in prompt
     clip = conn.execute("SELECT * FROM clips").fetchone()
     assert clip["campaign_id"] == "pod" and json.loads(clip["arms"])["campaign"] == "pod"
     assert "#ad" in clip["description"] and "@pod #pod" in clip["description"]
+    assert "#podcast #money" in clip["description"]  # Claude's hashtags, before the credit
     # only the platforms the campaign pays for
     assert sorted(r[0] for r in conn.execute("SELECT platform FROM posts")) == ["tiktok", "youtube"]
     # the same video is never clipped twice

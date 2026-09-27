@@ -210,3 +210,12 @@ def test_ayrshare_fills_platforms_not_connected_directly(conn, monkeypatch):
     pubs = platforms.enabled(Settings(youtube_refresh_token=""), conn, None)
     assert sorted(pubs) == ["instagram", "tiktok", "youtube"]
     assert all(isinstance(p, platforms.AyrsharePublisher) for p in pubs.values())
+
+
+def test_dashboard_shows_trends(tmp_path):
+    settings = Settings(data_dir=tmp_path)
+    conn = db.connect(settings.db_path)
+    db.put(conn, "trends:money podcast", '{"at": 1, "brief": {"hashtags": ["#moneytok"], "phrases": [], '
+                                         '"title_patterns": [], "sounds": ["sped-up pop <b>"], "notes": "hot"}}')
+    page = dashboard.render(conn, settings)
+    assert "money podcast" in page and "#moneytok" in page and "sped-up pop &lt;b&gt;" in page

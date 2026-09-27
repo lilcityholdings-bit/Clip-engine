@@ -27,6 +27,8 @@ Each clip records the choices behind it: **campaign or topic, format, clip lengt
 
 ### What makes the clips perform
 
+- **Rides current trends:** every 12 hours, for each campaign's niche, Claude searches the web for what's trending on Shorts, TikTok and Reels (hashtags, phrases, title formats, hot topics) and reads Google's daily trending searches. Titles, hooks and 3–5 hashtags per clip use that language when it honestly fits. The dashboard shows the latest trends.
+- **Music:** put tracks the company is **licensed** to use in monetized social videos (for example from an Epidemic Sound or Artlist subscription) in `/data/music`. The engine mixes one under the speech, ducking it whenever someone talks, and learns which tracks, or no music, earn the most. With `TIKTOK_AUTO_MUSIC=1`, clips without a bed get TikTok's own licensed recommended music. Trending songs themselves can't be used: they're copyrighted and get clips muted or claimed, and the posting APIs can't attach in-app sounds. The dashboard lists trending sounds so you can add licensed equivalents. Campaigns that ban added music set `"allow_music": false`.
 - **Learns from its own results:** once 8 clips have been scored, Claude sees the channel's best and worst clips (real titles, hooks and view counts) every time it picks new moments.
 - **Quality filter:** Claude scores every moment from 1 to 10 for watch-through and shares. Anything under 6 is never posted.
 - **Most-replayed moments:** for YouTube videos, the engine reads the "most replayed" graph and transcribes the minutes around the top peaks, anywhere in a 3-hour podcast. Claude is told which lines viewers rewatch most.

@@ -60,7 +60,8 @@ def choose(conn: sqlite3.Connection, dimension: str, arms: list[str], rng: rando
 
 
 def plan(conn: sqlite3.Connection, subjects: list[str], rng: random.Random | None = None,
-         subject_dim: str = "topic", formats: list[str] | None = None) -> dict[str, str]:
+         subject_dim: str = "topic", formats: list[str] | None = None,
+         music: list[str] | None = None) -> dict[str, str]:
     """Choose the arms for the next upload.
 
     subjects are topics (archive mode) or campaign ids (campaign mode, subject_dim="campaign").
@@ -73,6 +74,8 @@ def plan(conn: sqlite3.Connection, subjects: list[str], rng: random.Random | Non
         "length": choose(conn, "length", [f"{fmt}:{r}" for r in LENGTHS[fmt]], rng),
         "title_style": choose(conn, "title_style", TITLE_STYLES, rng),
         "post_hour": choose(conn, "post_hour", POST_HOURS, rng),
+        # "none" or a track from the licensed music library; learned like everything else.
+        "music": choose(conn, "music", ["none"] + (music or []), rng),
     }
 
 

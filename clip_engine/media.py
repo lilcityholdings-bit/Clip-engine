@@ -155,8 +155,37 @@ def plan_layout(video: Path, start: float, end: float) -> layout.Layout:
     return layout.choose(layout.sample_faces(video, start, end))
 
 
+MUSIC_EXTENSIONS = {".mp3", ".m4a", ".wav", ".aac", ".ogg"}
+MUSIC_VOLUME = 0.22  # the bed sits well under the speech, and ducks further while someone talks
+
+
+def music_library(data_dir: Path) -> dict[str, Path]:
+    """Licensed background tracks in DATA_DIR/music, by name. Only put tracks here that the
+    company has a license to use in monetized social videos."""
+    folder = Path(os.environ.get("MUSIC_DIR", data_dir / "music"))
+    if not folder.is_dir():
+        return {}
+    return {p.stem: p for p in sorted(folder.iterdir()) if p.suffix.lower() in MUSIC_EXTENSIONS}
+
+
+def audio_graph(music: bool) -> str:
+    """Audio filter: speech normalized to -14 LUFS, optionally over a ducked music bed."""
+    if not music:
+        return "[0:a]loudnorm=I=-14:TP=-1.5:LRA=11[aout]"
+    return (f"[1:a]volume={MUSIC_VOLUME}[bed];[0:a]asplit=2[voice][key];"
+            "[bed][key]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=400[ducked];"
+            "[voice][ducked]amix=inputs=2:duration=first:normalize=0,"
+            "loudnorm=I=-14:TP=-1.5:LRA=11[aout]")
+
+
+def has_audio(video: Path) -> bool:
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                          "-of", "csv=p=0", str(video)], capture_output=True, text=True).stdout
+    return bool(out.strip())
+
+
 def render(video: Path, out: Path, start: float, end: float, fmt: str, captions: str,
-           frame: layout.Layout | None = None) -> Path:
+           frame: layout.Layout | None = None, music: Path | None = None) -> Path:
     """Cut [start, end] and format it.
 
     Shorts are 1080x1920 using the given layout (see layout.py). Long clips are
@@ -173,11 +202,17 @@ def render(video: Path, out: Path, start: float, end: float, fmt: str, captions:
             "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
             f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,subtitles={subs.name}[v]"
         )
+    inputs = ["-ss", f"{start:.2f}", "-i", str(video.resolve())]
+    audio_maps: list[str] = []
+    if has_audio(video):
+        if music:
+            inputs += ["-stream_loop", "-1", "-i", str(Path(music).resolve())]
+        graph += ";" + audio_graph(bool(music))
+        audio_maps = ["-map", "[aout]"]
     # Run inside the output folder so the subtitles filter gets a plain file name.
     _run([
-        "ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-i", str(video.resolve()),
-        "-t", f"{end - start:.2f}", "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
-        "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+        "ffmpeg", "-y", "-v", "error", *inputs,
+        "-t", f"{end - start:.2f}", "-filter_complex", graph, "-map", "[v]", *audio_maps,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
         "-movflags", "+faststart", out.name,
     ], cwd=out.parent)

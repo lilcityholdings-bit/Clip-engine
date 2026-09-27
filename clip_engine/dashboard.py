@@ -10,6 +10,7 @@ GET  /health           liveness check for Railway
 import base64
 import hmac
 import html
+import json
 import logging
 import re
 import threading
@@ -20,7 +21,7 @@ from .config import Settings
 
 log = logging.getLogger(__name__)
 MEDIA_RE = re.compile(r"^/media/([0-9a-f]{32})\.mp4$")
-DIMENSIONS = {"campaign": "Campaign", "topic": "Topic", "format": "Format", "length": "Clip length",
+DIMENSIONS = {"music": "Music", "campaign": "Campaign", "topic": "Topic", "format": "Format", "length": "Clip length",
               "title_style": "Title style", "post_hour": "Posting time"}
 HOURS_ET = {"13": "9am ET", "16": "noon ET", "19": "3pm ET", "22": "6pm ET", "1": "9pm ET"}
 
@@ -61,6 +62,7 @@ button.primary {{ background:var(--accent); color:#fff; border-color:var(--accen
 <form method="post" action="/run"><button>Make clips now</button></form>
 </div></section>
 <section><h2>Links to submit</h2>{pending}</section>
+<section><h2>Trending now</h2>{trending}</section>
 <section><h2>Earnings by campaign</h2>{earnings}</section>
 <section><h2>What's working (higher score = more views and earnings)</h2>{strategy}</section>
 <section><h2>Recent clips</h2>{clips}</section>
@@ -78,6 +80,25 @@ def _table(headers: list[str], rows: list[list[str]], empty: str) -> str:
 
 def _link(url: str | None, text: str) -> str:
     return f'<a href="{html.escape(url)}">{html.escape(text)}</a>' if url else html.escape(text)
+
+
+def _trending(conn) -> str:
+    rows = conn.execute("SELECT key, value FROM kv WHERE key LIKE 'trends:%' ORDER BY key").fetchall()
+    e = html.escape
+    blocks = []
+    for r in rows:
+        b = json.loads(r["value"])["brief"]
+        lines = [f"<p><b>{e(r['key'][7:])}</b></p>"]
+        for label, key in (("Hashtags", "hashtags"), ("Phrases", "phrases"), ("Title formats", "title_patterns")):
+            if b.get(key):
+                lines.append(f"<p><span class=\"muted\">{label}:</span> {e(', '.join(b[key]))}</p>")
+        if b.get("notes"):
+            lines.append(f"<p><span class=\"muted\">Hot this week:</span> {e(b['notes'])}</p>")
+        if b.get("sounds"):
+            lines.append(f"<p><span class=\"muted\">Trending sounds</span> (copyrighted; add licensed "
+                         f"versions to the music library to use them): {e(', '.join(b['sounds']))}</p>")
+        blocks.append("".join(lines))
+    return "".join(blocks) or '<p class="muted">Trend research runs with the first clip.</p>'
 
 
 def render(conn, settings: Settings) -> str:
@@ -116,6 +137,7 @@ def render(conn, settings: Settings) -> str:
         posted=totals["posted"] or 0, queued=totals["queued"] or 0,
         toggle="resume" if paused else "pause", toggle_label="Resume" if paused else "Pause",
         pending=pending_html,
+        trending=_trending(conn),
         earnings=_table(["Campaign", "Clips", "Posts", "Views", "Est. $"],
                         [[e(r["campaign"]), str(r["clips"]), str(r["posts"]), f"{r['views']:,}",
                           f"{r['estimated_usd']:,.2f}"] for r in earn], "No campaign posts yet."),

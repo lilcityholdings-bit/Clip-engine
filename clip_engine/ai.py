@@ -92,6 +92,7 @@ def pick_clips(
     count: int,
     rules: str = "",
     track_record: str = "",
+    trends: str = "",
 ) -> list[dict]:
     """Choose the most watchable self-contained moments and write metadata for them.
 
@@ -112,10 +113,11 @@ def pick_clips(
                         "description": {"type": "string"},
                         "tags": {"type": "array", "items": {"type": "string"}},
                         "hook_text": {"type": "string"},
+                        "hashtags": {"type": "array", "items": {"type": "string"}},
                         "score": {"type": "integer"},
                         "why": {"type": "string"},
                     },
-                    "required": ["start", "end", "title", "description", "tags", "hook_text", "score", "why"],
+                    "required": ["start", "end", "title", "description", "tags", "hook_text", "hashtags", "score", "why"],
                     "additionalProperties": False,
                 },
             }
@@ -144,6 +146,18 @@ def pick_clips(
         "score: 1-10, how likely a stranger scrolling past watches this to the end and "
         "shares it. Be harsh: 5 is an average clip, 8+ is rare. Only return moments that "
         "are genuinely strong; returning fewer clips is better than weak ones."
+    )
+    if trends:
+        prompt += (
+            "\n\nWhat's trending right now:\n" + trends + "\n"
+            "Use this to write the title, hook and hashtags in today's language: borrow a "
+            "trending phrase or title format when it honestly fits what's said in the clip, "
+            "and prefer moments that connect to a hot topic. Never misrepresent the clip to "
+            "chase a trend."
+        )
+    prompt += (
+        "\n\nhashtags: 3-5 hashtags for the caption, mixing 1-2 trending ones that genuinely "
+        "fit with specific ones for the topic (include the # sign)."
     )
     if track_record:
         prompt += (

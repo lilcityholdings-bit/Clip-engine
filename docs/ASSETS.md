@@ -17,6 +17,8 @@ Every external account and dependency this product relies on. Keep it current, b
 
 ## Content sources and licenses
 
+- Background music: only tracks licensed for monetized social use, stored in `/data/music`. Record each track's license source here.
+
 - Internet Archive curated collections: `prelinger`, `feature_films`, `fedflix`, `nasa`, `usgovernmentdocuments`.
 - Accepted licenses: public domain, CC0, CC BY, CC BY-SA.
 - Every upload's source, creator and license is stored in the `sources` table and written in the video description.
