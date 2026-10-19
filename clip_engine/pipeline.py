@@ -170,7 +170,7 @@ def compose_description(clip: dict, footer: str) -> str:
 
 # New accounts that suddenly post a lot look like spam, so output ramps up:
 # (days since the first clip, clips per day). After the last step, MAX_CLIPS_PER_DAY applies.
-RAMP = [(7, 2), (14, 4)]
+RAMP = [(7, 4)]
 
 
 def daily_clip_limit(conn: sqlite3.Connection, settings: Settings) -> int:

@@ -55,7 +55,7 @@ Whop has no API for submitting clips, so new post links go to `DIGEST_WEBHOOK_UR
 ## Review mode and gradual start
 
 - **Review mode** is on by default. New clips appear on the dashboard under "Waiting for your approval", with a video preview, the hook, the caption and the platforms. Nothing posts until you tap **Approve**. **Reject** deletes the clip. Turn review mode off under Settings once you trust the output.
-- **Gradual start** protects new accounts from looking like spam: up to 2 clips a day in the first week, 4 in the second, then `MAX_CLIPS_PER_DAY`. It can be switched off under Settings.
+- **Gradual start** protects new accounts from looking like spam: up to 4 clips a day in the first week, then `MAX_CLIPS_PER_DAY` (6). It can be switched off under Settings.
 - Clip-making runs in the background, so scheduled posts go out on time even during a long transcription. A 10-minute video needs about 0.9 GB of memory and a few minutes of CPU.
 
 ## Dashboard

@@ -313,7 +313,7 @@ def _settings(conn, settings: Settings) -> str:
         f'<form method="post" action="/settings/review" style="margin-top:8px"><button>'
         f'{"Turn off (post automatically)" if review_on else "Turn on"}</button></form></div>'
         f'<div class="card"><b>Gradual start:</b> {"on" if ramp_on else "off"} &middot; up to {limit} clips today'
-        f'<div class="muted">Protects new accounts from looking like spam: 2 clips a day in week 1, 4 in week 2, '
+        f'<div class="muted">Protects new accounts from looking like spam: 4 clips a day in week 1, '
         f'then {settings.max_clips_per_day}.</div>'
         f'<form method="post" action="/settings/ramp" style="margin-top:8px"><button>'
         f'{"Turn off" if ramp_on else "Turn on"}</button></form></div>')

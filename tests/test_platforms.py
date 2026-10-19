@@ -360,7 +360,7 @@ def test_approve_all(server, tmp_path):
 def test_settings_switches(server, tmp_path):
     base, conn = server
     page = _get(base + "/", "s3cret").read().decode()
-    assert "Turn off (post automatically)" in page and "up to 2 clips today" in page
+    assert "Turn off (post automatically)" in page and "up to 4 clips today" in page
     _get(base + "/settings/review", "s3cret", data=b"")
     _get(base + "/settings/ramp", "s3cret", data=b"")
     fresh = db.connect(tmp_path / "clip_engine.db")

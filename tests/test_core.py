@@ -454,9 +454,9 @@ def test_review_mode_can_be_switched_off(conn, tmp_path):
 def test_posting_ramps_up_for_new_accounts(conn, tmp_path):
     from clip_engine import db
     settings = Settings(data_dir=tmp_path, max_clips_per_day=6)
-    assert pipeline.daily_clip_limit(conn, settings) == 2  # no clips yet: day 0
+    assert pipeline.daily_clip_limit(conn, settings) == 4  # no clips yet: day 0
     clip_id, _ = _add_clip(conn, tmp_path)
-    for days, expected in ((3, 2), (8, 4), (20, 6)):
+    for days, expected in ((3, 4), (8, 6), (20, 6)):
         conn.execute("UPDATE clips SET created_at = datetime('now', ?) WHERE id = ?", (f"-{days} days", clip_id))
         assert pipeline.daily_clip_limit(conn, settings) == expected
     conn.execute("UPDATE clips SET created_at = datetime('now', '-1 day')")
