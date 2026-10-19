@@ -67,8 +67,8 @@ textarea {{ min-height:70px; }} .checks label {{ display:inline-flex; gap:6px; f
 .notice {{ border-color:var(--good); }} .error {{ border-color:var(--bad); color:var(--bad); }}
 summary {{ cursor:pointer; font-weight:600; color:var(--accent); }} form.inline {{ display:inline; }}
 .card {{ padding:10px 0; border-top:1px solid var(--line); }} .card:first-of-type {{ border-top:0; }}
-video {{ width:100%; max-width:320px; border-radius:10px; background:#000; display:block; margin:8px 0; }}
-.desc {{ white-space:pre-wrap; font-size:13px; color:var(--muted); max-height:7em; overflow:auto; }}
+video {{ width:100%; max-width:280px; aspect-ratio:9/16; object-fit:contain; border-radius:10px; background:#000; display:block; margin:8px 0; }}
+.desc {{ white-space:pre-wrap; font-size:13px; color:var(--muted); }}
 a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1px solid var(--line); text-decoration:none; }}
 </style></head><body><main>
 <h1>Clip Engine <span class="{state_class}">&middot; {state}</span></h1>
@@ -191,17 +191,18 @@ def _campaign_form(values: dict | None, editing: bool, open_form: bool) -> str:
 </form></details>"""
 
 
-def _review(conn) -> str:
+def _review(conn, settings: Settings) -> str:
     """Clips waiting for approval, each with a playable preview."""
     waiting = pipeline.awaiting_review(conn)
     if not waiting:
         return ""
     e = html.escape
+    names = {c.id: c.name for c in campaigns.load(settings.data_dir)}
     cards = []
     for c in waiting:
         cards.append(
             f'<div class="card"><b>{e(c["title"])}</b>'
-            f'<div class="muted">{e(c["campaign_id"] or "archive")} &middot; {c["seconds"]:.0f}s &middot; AI score '
+            f'<div class="muted">{e(names.get(c["campaign_id"], c["campaign_id"] or "archive"))} &middot; {c["seconds"]:.0f}s &middot; AI score '
             f'{e(str(c["ai_score"] or "?"))}/10 &middot; posts to '
             f'{e(", ".join(PLATFORM_NAMES.get(p.strip(), p) for p in c["platforms"].split(",")))}</div>'
             + (f'<div>On-screen hook: <b>{e(c["hook_text"])}</b></div>' if c.get("hook_text") else "")
@@ -277,7 +278,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
         banner = f'<section class="error">{e(error)}</section>'
     return PAGE.format(
         banner=banner,
-        review=_review(conn),
+        review=_review(conn, settings),
         settings_html=_settings(conn, settings),
         campaigns=_campaign_rows(settings),
         campaign_form=_campaign_form(form_values, editing=bool(form_values and form_values.get("id")),
