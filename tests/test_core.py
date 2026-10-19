@@ -384,7 +384,14 @@ def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
     # the same video is never clipped twice
     assert pipeline.produce(conn, settings, claude, None, pubs, 2) == 0
 
+    # Review mode is on by default: nothing posts until the clip is approved.
+    assert {r[0] for r in conn.execute("SELECT status FROM posts")} == {"review"}
+    [waiting] = pipeline.awaiting_review(conn)
+    assert waiting["platforms"] == "youtube, tiktok" and waiting["hook_text"] == "Wait for it"
     conn.execute("UPDATE posts SET scheduled_at = datetime('now', '-1 minute')")
+    assert pipeline.publish_due(conn, settings, pubs) == 0
+    pipeline.approve(conn, waiting["id"])
+    assert pipeline.awaiting_review(conn) == []
     assert pipeline.publish_due(conn, settings, pubs) == 2
     conn.execute("UPDATE posts SET views = 1000")
     assert pipeline.earnings(conn, settings)[0] == {"campaign": "pod", "clips": 1, "posts": 2, "views": 2000,
@@ -410,3 +417,44 @@ def test_track_record_feeds_winners_and_losers(conn, tmp_path):
     ai.pick_clips(client, [], source_title="T", fmt="short", min_sec=20, max_sec=35,
                   title_style="question", count=1, track_record=text)
     assert "9,000 views" in client.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+
+
+def test_reject_deletes_file_and_never_posts(conn, tmp_path):
+    clip_id, f = _add_clip(conn, tmp_path)
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'tiktok', 'review',"
+                 " datetime('now', '-1 minute'))", (clip_id,))
+    pipeline.cleanup_files(conn)
+    assert f.exists()  # kept while waiting for review
+    pipeline.reject(conn, clip_id)
+    assert not f.exists()
+    assert pipeline.publish_due(conn, Settings(data_dir=tmp_path), {"tiktok": FakePub("tiktok")}) == 0
+    assert conn.execute("SELECT status FROM posts").fetchone()[0] == "rejected"
+
+
+def test_approve_keeps_future_slot(conn, tmp_path):
+    clip_id, _ = _add_clip(conn, tmp_path)
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'youtube', 'review',"
+                 " datetime('now', '+3 hours'))", (clip_id,))
+    pipeline.approve(conn, clip_id)
+    row = conn.execute("SELECT status, scheduled_at > datetime('now', '+2 hours') FROM posts").fetchone()
+    assert tuple(row) == ("queued", 1)
+
+
+def test_review_mode_can_be_switched_off(conn, tmp_path):
+    from clip_engine import db
+    assert pipeline.review_mode(conn)
+    db.put(conn, "review_mode", "off")
+    assert not pipeline.review_mode(conn)
+
+
+def test_posting_ramps_up_for_new_accounts(conn, tmp_path):
+    from clip_engine import db
+    settings = Settings(data_dir=tmp_path, max_clips_per_day=6)
+    assert pipeline.daily_clip_limit(conn, settings) == 2  # no clips yet: day 0
+    clip_id, _ = _add_clip(conn, tmp_path)
+    for days, expected in ((3, 2), (8, 4), (20, 6)):
+        conn.execute("UPDATE clips SET created_at = datetime('now', ?) WHERE id = ?", (f"-{days} days", clip_id))
+        assert pipeline.daily_clip_limit(conn, settings) == expected
+    conn.execute("UPDATE clips SET created_at = datetime('now', '-1 day')")
+    db.put(conn, "ramp", "off")
+    assert pipeline.daily_clip_limit(conn, settings) == 6

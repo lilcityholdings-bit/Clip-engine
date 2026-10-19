@@ -17,7 +17,7 @@ from pathlib import Path
 
 import anthropic
 
-from . import ai, campaigns, media, moments, sources, strategy, trends
+from . import ai, campaigns, db, media, moments, sources, strategy, trends
 from .config import Settings
 from .db import clips_today, posts_today
 from .platforms import PublishError, next_slot
@@ -168,6 +168,49 @@ def compose_description(clip: dict, footer: str) -> str:
     return "\n\n".join(part for part in (clip["description"], tags, footer) if part)
 
 
+# New accounts that suddenly post a lot look like spam, so output ramps up:
+# (days since the first clip, clips per day). After the last step, MAX_CLIPS_PER_DAY applies.
+RAMP = [(7, 2), (14, 4)]
+
+
+def daily_clip_limit(conn: sqlite3.Connection, settings: Settings) -> int:
+    if db.get(conn, "ramp", "on") != "on":
+        return settings.max_clips_per_day
+    first = conn.execute("SELECT MIN(created_at) FROM clips").fetchone()[0]
+    days = (datetime.utcnow() - datetime.fromisoformat(first)).days if first else 0
+    for until_day, limit in RAMP:
+        if days < until_day:
+            return min(limit, settings.max_clips_per_day)
+    return settings.max_clips_per_day
+
+
+def review_mode(conn: sqlite3.Connection) -> bool:
+    """When on (the default), new clips wait on the dashboard until approved."""
+    return db.get(conn, "review_mode", "on") == "on"
+
+
+def awaiting_review(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT c.id, c.title, c.description, c.campaign_id, c.media_token, c.ai_score, c.hook_text,"
+        " c.end_sec - c.start_sec AS seconds, GROUP_CONCAT(p.platform, ', ') AS platforms"
+        " FROM clips c JOIN posts p ON p.clip_id = c.id WHERE p.status = 'review'"
+        " GROUP BY c.id ORDER BY c.id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def approve(conn: sqlite3.Connection, clip_id: int) -> None:
+    """Queue a reviewed clip: keep its scheduled slot if it's still ahead, otherwise post now."""
+    conn.execute("UPDATE posts SET status = 'queued', scheduled_at = MAX(scheduled_at, datetime('now'))"
+                 " WHERE clip_id = ? AND status = 'review'", (clip_id,))
+    conn.commit()
+
+
+def reject(conn: sqlite3.Connection, clip_id: int) -> None:
+    conn.execute("UPDATE posts SET status = 'rejected' WHERE clip_id = ? AND status = 'review'", (clip_id,))
+    conn.commit()
+    cleanup_files(conn)
+
+
 def snap_to_words(clip: dict, words: list[dict]) -> dict:
     """Start exactly on the first spoken word and end just after the last, so there's no dead air."""
     inside = [w for w in words if w["start"] >= clip["start"] - 0.3 and w["end"] <= clip["end"] + 0.3]
@@ -183,7 +226,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
     if not publishers:
         log.warning("no publishing platform is configured")
         return 0
-    remaining = min(max_clips, settings.max_clips_per_day - clips_today(conn))
+    remaining = min(max_clips, daily_clip_limit(conn, settings) - clips_today(conn))
     if remaining <= 0:
         log.info("daily clip limit reached")
         return 0
@@ -257,9 +300,10 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                  compose_description(clip, job.footer), json.dumps(clip["tags"]), json.dumps(arms),
                  str(out), token, clip.get("score"), clip.get("hook_text", "")),
             )
+            status = "review" if review_mode(conn) else "queued"
             for platform in platforms:
-                conn.execute("INSERT INTO posts (clip_id, platform, scheduled_at) VALUES (?, ?, ?)",
-                             (cur.lastrowid, platform, slot))
+                conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, ?, ?, ?)",
+                             (cur.lastrowid, platform, status, slot))
             conn.commit()
             queued += 1
             log.info("queued clip %s for %s at %s: %s", cur.lastrowid, platforms, slot, clip["title"])
@@ -316,7 +360,7 @@ def cleanup_files(conn: sqlite3.Connection) -> None:
     """Delete rendered files once no post of that clip is still queued."""
     rows = conn.execute(
         "SELECT id, file_path FROM clips WHERE file_path IS NOT NULL AND NOT EXISTS"
-        " (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status = 'queued')"
+        " (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status IN ('queued', 'review'))"
     ).fetchall()
     for r in rows:
         Path(r["file_path"]).unlink(missing_ok=True)
@@ -329,7 +373,7 @@ def score(conn: sqlite3.Connection, settings: Settings, publishers: dict) -> int
     cutoff = (datetime.utcnow() - timedelta(hours=settings.score_after_hours)).strftime("%Y-%m-%d %H:%M:%S")
     clips = conn.execute(
         "SELECT id, arms, campaign_id FROM clips WHERE scored_at IS NULL"
-        " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status = 'queued')"
+        " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status IN ('queued', 'review'))"
         " AND EXISTS (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status = 'posted')"
         " AND (SELECT MIN(posted_at) FROM posts WHERE posts.clip_id = clips.id AND status = 'posted') <= ?",
         (cutoff,),

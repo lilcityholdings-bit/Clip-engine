@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY,
     clip_id INTEGER NOT NULL REFERENCES clips(id),
     platform TEXT NOT NULL,           -- youtube | tiktok | instagram
-    status TEXT NOT NULL DEFAULT 'queued',  -- queued | posted | failed
+    status TEXT NOT NULL DEFAULT 'queued',  -- review | queued | posted | failed | rejected
     scheduled_at TEXT NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
     external_id TEXT,

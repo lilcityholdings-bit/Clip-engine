@@ -4,6 +4,8 @@ GET  /                 dashboard (HTTP basic auth, any username + DASHBOARD_PASS
 POST /pause, /resume   stop or restart posting and production
 POST /run              start a production cycle on the next tick
 POST /submitted        mark all pending campaign links as submitted
+POST /review/approve, /review/reject, /review/approve-all   decide on clips waiting for review
+POST /settings/review, /settings/ramp   switch review mode / gradual start on or off
 POST /campaigns/save   add or update a campaign from the form
 POST /campaigns/toggle pause or resume one campaign
 POST /campaigns/delete remove a campaign added from the dashboard
@@ -27,6 +29,7 @@ from .config import Settings
 
 log = logging.getLogger(__name__)
 MEDIA_RE = re.compile(r"^/media/([0-9a-f]{32})\.mp4$")
+RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 DIMENSIONS = {"music": "Music", "campaign": "Campaign", "topic": "Topic", "format": "Format", "length": "Clip length",
               "title_style": "Title style", "post_hour": "Posting time"}
 PLATFORM_NAMES = {"youtube": "YouTube", "tiktok": "TikTok", "instagram": "Instagram"}
@@ -64,10 +67,13 @@ textarea {{ min-height:70px; }} .checks label {{ display:inline-flex; gap:6px; f
 .notice {{ border-color:var(--good); }} .error {{ border-color:var(--bad); color:var(--bad); }}
 summary {{ cursor:pointer; font-weight:600; color:var(--accent); }} form.inline {{ display:inline; }}
 .card {{ padding:10px 0; border-top:1px solid var(--line); }} .card:first-of-type {{ border-top:0; }}
+video {{ width:100%; max-width:320px; border-radius:10px; background:#000; display:block; margin:8px 0; }}
+.desc {{ white-space:pre-wrap; font-size:13px; color:var(--muted); max-height:7em; overflow:auto; }}
 a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1px solid var(--line); text-decoration:none; }}
 </style></head><body><main>
 <h1>Clip Engine <span class="{state_class}">&middot; {state}</span></h1>
 {banner}
+{review}
 <section><div class="row">
 <div class="stat"><b>${earned}</b><span>estimated earnings</span></div>
 <div class="stat"><b>{views}</b><span>total views</span></div>
@@ -84,6 +90,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 <section><h2>What's working (higher score = more views and earnings)</h2>{strategy}</section>
 <section><h2>Recent clips</h2>{clips}</section>
 <section><h2>Recent problems</h2>{errors}</section>
+<section><h2>Settings</h2>{settings_html}</section>
 </main></body></html>"""
 
 
@@ -184,6 +191,51 @@ def _campaign_form(values: dict | None, editing: bool, open_form: bool) -> str:
 </form></details>"""
 
 
+def _review(conn) -> str:
+    """Clips waiting for approval, each with a playable preview."""
+    waiting = pipeline.awaiting_review(conn)
+    if not waiting:
+        return ""
+    e = html.escape
+    cards = []
+    for c in waiting:
+        cards.append(
+            f'<div class="card"><b>{e(c["title"])}</b>'
+            f'<div class="muted">{e(c["campaign_id"] or "archive")} &middot; {c["seconds"]:.0f}s &middot; AI score '
+            f'{e(str(c["ai_score"] or "?"))}/10 &middot; posts to '
+            f'{e(", ".join(PLATFORM_NAMES.get(p.strip(), p) for p in c["platforms"].split(",")))}</div>'
+            + (f'<div>On-screen hook: <b>{e(c["hook_text"])}</b></div>' if c.get("hook_text") else "")
+            + f'<video controls playsinline preload="metadata" src="/media/{e(c["media_token"])}.mp4"></video>'
+            f'<div class="desc">{e(c["description"])}</div>'
+            f'<div class="row" style="margin-top:8px">'
+            f'<form class="inline" method="post" action="/review/approve"><input type="hidden" name="id" '
+            f'value="{c["id"]}"><button class="primary">Approve</button></form>'
+            f'<form class="inline" method="post" action="/review/reject"><input type="hidden" name="id" '
+            f'value="{c["id"]}"><button>Reject</button></form></div></div>')
+    approve_all = ('<form method="post" action="/review/approve-all" style="margin-top:10px"><button>Approve all '
+                   f'{len(waiting)}</button></form>' if len(waiting) > 1 else "")
+    return (f'<section id="review"><h2>Waiting for your approval ({len(waiting)})</h2>'
+            f'<p class="muted">Nothing posts until you approve it. Approved clips go out at their scheduled time.</p>'
+            f'{"".join(cards)}{approve_all}</section>')
+
+
+def _settings(conn, settings: Settings) -> str:
+    review_on = pipeline.review_mode(conn)
+    ramp_on = db.get(conn, "ramp", "on") == "on"
+    limit = pipeline.daily_clip_limit(conn, settings)
+    return (
+        f'<div class="card"><b>Review clips before posting:</b> '
+        f'{"<span class=good>on</span>" if review_on else "<span class=bad>off</span>"}'
+        f'<div class="muted">On: every clip waits for you to approve it. Off: clips post automatically.</div>'
+        f'<form method="post" action="/settings/review" style="margin-top:8px"><button>'
+        f'{"Turn off (post automatically)" if review_on else "Turn on"}</button></form></div>'
+        f'<div class="card"><b>Gradual start:</b> {"on" if ramp_on else "off"} &middot; up to {limit} clips today'
+        f'<div class="muted">Protects new accounts from looking like spam: 2 clips a day in week 1, 4 in week 2, '
+        f'then {settings.max_clips_per_day}.</div>'
+        f'<form method="post" action="/settings/ramp" style="margin-top:8px"><button>'
+        f'{"Turn off" if ramp_on else "Turn on"}</button></form></div>')
+
+
 def render(conn, settings: Settings, notice: str = "", error: str = "", form_values: dict | None = None,
            edit_id: str = "") -> str:
     e = html.escape
@@ -225,6 +277,8 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
         banner = f'<section class="error">{e(error)}</section>'
     return PAGE.format(
         banner=banner,
+        review=_review(conn),
+        settings_html=_settings(conn, settings),
         campaigns=_campaign_rows(settings),
         campaign_form=_campaign_form(form_values, editing=bool(form_values and form_values.get("id")),
                                      open_form=bool(form_values) or not campaigns.load(settings.data_dir)),
@@ -287,14 +341,7 @@ def make_handler(settings: Settings):
                 path = media_dir / f"{match.group(1)}.mp4"
                 if not path.exists():
                     return self._send(404, b"not found", "text/plain")
-                self.send_response(200)
-                self.send_header("Content-Type", "video/mp4")
-                self.send_header("Content-Length", str(path.stat().st_size))
-                self.end_headers()
-                with open(path, "rb") as f:
-                    while chunk := f.read(1024 * 1024):
-                        self.wfile.write(chunk)
-                return
+                return self._send_video(path)
             url = urlsplit(self.path)
             if url.path != "/":
                 return self._send(404, b"not found", "text/plain")
@@ -302,6 +349,37 @@ def make_handler(settings: Settings):
                 return self._deny()
             query = {k: v[0] for k, v in parse_qs(url.query).items()}
             self._page(notice=query.get("notice", ""), edit_id=query.get("edit", ""))
+
+        def _send_video(self, path) -> None:
+            """Serve a clip, honouring byte ranges (iPhones won't play video without them)."""
+            size = path.stat().st_size
+            start, end = 0, size - 1
+            match = RANGE_RE.match(self.headers.get("Range", ""))
+            if match and size:
+                if match.group(1):
+                    start = int(match.group(1))
+                    end = min(int(match.group(2)), size - 1) if match.group(2) else size - 1
+                elif match.group(2):  # "bytes=-N": the last N bytes
+                    start = max(0, size - int(match.group(2)))
+                if start > end or start >= size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(end - start + 1))
+            self.end_headers()
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = end - start + 1
+                while remaining > 0 and (chunk := f.read(min(1024 * 1024, remaining))):
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
 
         def _page(self, **kwargs) -> None:
             conn = db.connect(settings.db_path)
@@ -341,6 +419,16 @@ def make_handler(settings: Settings):
                     db.put(conn, "run_now", "1")
                 elif self.path == "/submitted":
                     pipeline.mark_submitted(conn, [p["id"] for p in pipeline.pending_submissions(conn)])
+                elif self.path in ("/review/approve", "/review/reject"):
+                    clip_id = int(self._form().get("id", ["0"])[0] or 0)
+                    (pipeline.approve if self.path.endswith("approve") else pipeline.reject)(conn, clip_id)
+                elif self.path == "/review/approve-all":
+                    for c in pipeline.awaiting_review(conn):
+                        pipeline.approve(conn, c["id"])
+                elif self.path == "/settings/review":
+                    db.put(conn, "review_mode", "off" if pipeline.review_mode(conn) else "on")
+                elif self.path == "/settings/ramp":
+                    db.put(conn, "ramp", "off" if db.get(conn, "ramp", "on") == "on" else "on")
                 else:
                     return self._send(404, b"not found", "text/plain")
             finally:

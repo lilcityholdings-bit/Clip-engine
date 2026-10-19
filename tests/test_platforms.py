@@ -312,3 +312,69 @@ def test_env_campaigns_show_but_cannot_be_deleted(server, tmp_path, monkeypatch)
 def html_unescape(text):
     import html
     return html.unescape(text)
+
+
+# --- review mode -----------------------------------------------------------
+
+def _queue_for_review(conn, tmp_path, token="c" * 32):
+    (tmp_path / "clips" / f"{token}.mp4").write_bytes(b"0123456789")
+    cid = conn.execute(
+        "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms,"
+        " file_path, media_token, ai_score, hook_text) VALUES ('s', 'pod', 0, 30, 'Big reveal', 'desc #ad', '[]',"
+        " '{}', ?, ?, 8, 'wait')", (str(tmp_path / "clips" / f"{token}.mp4"), token)).lastrowid
+    for p in ("youtube", "tiktok"):
+        conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, ?, 'review',"
+                     " datetime('now'))", (cid, p))
+    conn.commit()
+    return cid
+
+
+def test_review_card_approve_and_reject(server, tmp_path):
+    base, conn = server
+    first = _queue_for_review(conn, tmp_path)
+    second = _queue_for_review(conn, tmp_path, token="d" * 32)
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Waiting for your approval (2)" in page and "Big reveal" in page
+    assert f'src="/media/{"c" * 32}.mp4"' in page and "posts to YouTube, TikTok" in page and "On-screen hook: <b>wait</b>" in page
+
+    _get(base + "/review/approve", "s3cret", data=f"id={first}".encode())
+    _get(base + "/review/reject", "s3cret", data=f"id={second}".encode())
+    rows = dict(conn.execute("SELECT clip_id, GROUP_CONCAT(DISTINCT status) FROM posts GROUP BY clip_id").fetchall())
+    assert rows == {first: "queued", second: "rejected"}
+    assert not (tmp_path / "clips" / ("d" * 32 + ".mp4")).exists()
+    assert "Waiting for your approval" not in _get(base + "/", "s3cret").read().decode()
+
+
+def test_approve_all(server, tmp_path):
+    base, conn = server
+    _queue_for_review(conn, tmp_path)
+    _queue_for_review(conn, tmp_path, token="d" * 32)
+    _get(base + "/review/approve-all", "s3cret", data=b"")
+    assert {r[0] for r in conn.execute("SELECT status FROM posts")} == {"queued"}
+
+
+def test_settings_switches(server, tmp_path):
+    base, conn = server
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Turn off (post automatically)" in page and "up to 2 clips today" in page
+    _get(base + "/settings/review", "s3cret", data=b"")
+    _get(base + "/settings/ramp", "s3cret", data=b"")
+    fresh = db.connect(tmp_path / "clip_engine.db")
+    assert (db.get(fresh, "review_mode"), db.get(fresh, "ramp")) == ("off", "off")
+
+
+def test_media_supports_byte_ranges(server, tmp_path):
+    base, _ = server
+    url = base + "/media/" + "a" * 32 + ".mp4"  # contains b"MP4DATA"
+    for header, status, body, content_range in (
+            ("bytes=0-1", 206, b"MP", "bytes 0-1/7"),
+            ("bytes=3-", 206, b"DATA", "bytes 3-6/7"),
+            ("bytes=-2", 206, b"TA", "bytes 5-6/7")):
+        req = urllib.request.Request(url, headers={"Range": header})
+        resp = urllib.request.urlopen(req, timeout=5)
+        assert (resp.status, resp.read(), resp.headers["Content-Range"]) == (status, body, content_range)
+    with pytest.raises(urllib.error.HTTPError) as err:
+        urllib.request.urlopen(urllib.request.Request(url, headers={"Range": "bytes=50-60"}), timeout=5)
+    assert err.value.code == 416
+    full = urllib.request.urlopen(url, timeout=5)
+    assert full.status == 200 and full.headers["Accept-Ranges"] == "bytes"

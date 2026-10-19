@@ -8,6 +8,7 @@ python -m clip_engine report     # what the strategy has learned, earnings, link
 """
 import logging
 import sys
+import threading
 import time
 
 import anthropic
@@ -33,6 +34,30 @@ def due(conn, key: str, every_hours: float) -> bool:
     return True
 
 
+_producer: threading.Thread | None = None
+
+
+def start_producer(settings: Settings, claude, platform_names: list[str]) -> threading.Thread:
+    """Make clips in the background: a cycle can take half an hour, and scheduled posts
+    must keep going out meanwhile. The thread uses its own database and API clients."""
+    global _producer
+
+    def run() -> None:
+        conn = db.connect(settings.db_path)
+        try:
+            yt = YouTube(settings) if settings.youtube_refresh_token else None
+            pipeline.produce(conn, settings, claude, yt, dict.fromkeys(platform_names), CLIPS_PER_CYCLE)
+        except Exception as exc:
+            log.exception("produce failed; will retry next cycle")
+            pipeline.notify(settings.digest_webhook_url, f"clip-engine: produce failed and will retry: {exc!r}")
+        finally:
+            conn.close()
+
+    _producer = threading.Thread(target=run, daemon=True, name="producer")
+    _producer.start()
+    return _producer
+
+
 def tick(conn, settings: Settings, claude, yt, pubs) -> None:
     """One pass of the scheduler. Every step is isolated so one failure doesn't stop the rest."""
     if db.get(conn, "paused") == "1":
@@ -42,9 +67,10 @@ def tick(conn, settings: Settings, claude, yt, pubs) -> None:
         steps += [("score", lambda: pipeline.score(conn, settings, pubs)),
                   ("views", lambda: pipeline.refresh_views(conn, pubs)),
                   ("digest", lambda: pipeline.send_digest(conn, settings.digest_webhook_url))]
-    if db.get(conn, "run_now") == "1" or due(conn, "last_produce", PRODUCE_EVERY_HOURS):
+    producing = _producer is not None and _producer.is_alive()
+    if not producing and (db.get(conn, "run_now") == "1" or due(conn, "last_produce", PRODUCE_EVERY_HOURS)):
         db.put(conn, "run_now", "0")
-        steps.append(("produce", lambda: pipeline.produce(conn, settings, claude, yt, pubs, CLIPS_PER_CYCLE)))
+        start_producer(settings, claude, list(pubs))
     for name, fn in steps:
         try:
             fn()
