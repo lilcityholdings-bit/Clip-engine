@@ -37,7 +37,7 @@ def due(conn, key: str, every_hours: float) -> bool:
 _producer: threading.Thread | None = None
 
 
-def start_producer(settings: Settings, claude, platform_names: list[str]) -> threading.Thread:
+def start_producer(settings: Settings, claude, publishers: dict) -> threading.Thread:
     """Make clips in the background: a cycle can take half an hour, and scheduled posts
     must keep going out meanwhile. The thread uses its own database and API clients."""
     global _producer
@@ -46,7 +46,7 @@ def start_producer(settings: Settings, claude, platform_names: list[str]) -> thr
         conn = db.connect(settings.db_path)
         try:
             yt = YouTube(settings) if settings.youtube_refresh_token else None
-            pipeline.produce(conn, settings, claude, yt, dict.fromkeys(platform_names), CLIPS_PER_CYCLE)
+            pipeline.produce(conn, settings, claude, yt, publishers, CLIPS_PER_CYCLE)
         except Exception as exc:
             log.exception("produce failed; will retry next cycle")
             pipeline.notify(settings.digest_webhook_url, f"clip-engine: produce failed and will retry: {exc!r}")
@@ -70,7 +70,7 @@ def tick(conn, settings: Settings, claude, yt, pubs) -> None:
     producing = _producer is not None and _producer.is_alive()
     if not producing and (db.get(conn, "run_now") == "1" or due(conn, "last_produce", PRODUCE_EVERY_HOURS)):
         db.put(conn, "run_now", "0")
-        start_producer(settings, claude, list(pubs))
+        start_producer(settings, claude, pubs)
     for name, fn in steps:
         try:
             fn()
@@ -100,7 +100,10 @@ def main(argv: list[str]) -> int:
     claude = anthropic.Anthropic()
     yt = YouTube(settings) if settings.youtube_refresh_token else None
     pubs = platforms.enabled(settings, conn, yt)
-    log.info("publishing to: %s", ", ".join(pubs) or "nothing yet (no platform credentials)")
+    auto = [name for name, pub in pubs.items() if not platforms.is_manual(pub)]
+    db.put(conn, "auto_platforms", ",".join(auto))
+    log.info("posting automatically to: %s; from your phone: %s", ", ".join(auto) or "none",
+             ", ".join(n for n in pubs if n not in auto) or "none")
     if command == "produce":
         pipeline.produce(conn, settings, claude, yt, pubs, CLIPS_PER_CYCLE)
     elif command == "publish":

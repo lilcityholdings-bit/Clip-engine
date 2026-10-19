@@ -2,6 +2,12 @@
 
 A fully automated clipping business. It finds long videos, cuts the best moments into Shorts, posts them to **YouTube, TikTok and Instagram Reels**, and learns from views and earnings what to make next.
 
+## Phone posting mode (free, the default)
+
+Any platform without an automatic posting connection is posted by you from your phone. The engine still finds the moments, cuts, frames and captions the clip, writes the title, hashtags, required tags and #ad, and picks a time. Approved clips appear under **Ready to post** on the dashboard, with a **Download video** button, **Copy** buttons for the title and caption, and per-app tips. Post in the app, which also lets you add a trending sound, then paste the post's link into the box. The link joins your Whop links, and its public view count feeds the strategy. Clips nobody posts within 7 days are dropped.
+
+A platform switches to automatic posting as soon as its connection (Ayrshare or a direct API key) is added in Railway.
+
 ## Easy setup (about 15 minutes, all from a phone)
 
 1. **Ayrshare** (ayrshare.com): sign up on a plan that includes API access and video. Connect your YouTube, TikTok and Instagram accounts in their app, then copy your API key. Ayrshare is already approved by all three platforms, so no developer apps or platform reviews are needed.

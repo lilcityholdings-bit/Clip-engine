@@ -390,6 +390,8 @@ def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
     assert waiting["platforms"] == "youtube, tiktok" and waiting["hook_text"] == "Wait for it"
     conn.execute("UPDATE posts SET scheduled_at = datetime('now', '-1 minute')")
     assert pipeline.publish_due(conn, settings, pubs) == 0
+    from clip_engine import db
+    db.put(conn, "auto_platforms", "youtube,tiktok,instagram")
     pipeline.approve(conn, waiting["id"])
     assert pipeline.awaiting_review(conn) == []
     assert pipeline.publish_due(conn, settings, pubs) == 2
@@ -432,6 +434,8 @@ def test_reject_deletes_file_and_never_posts(conn, tmp_path):
 
 
 def test_approve_keeps_future_slot(conn, tmp_path):
+    from clip_engine import db
+    db.put(conn, "auto_platforms", "youtube")
     clip_id, _ = _add_clip(conn, tmp_path)
     conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'youtube', 'review',"
                  " datetime('now', '+3 hours'))", (clip_id,))

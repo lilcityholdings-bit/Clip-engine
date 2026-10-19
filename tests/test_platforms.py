@@ -99,10 +99,13 @@ def test_instagram_needs_public_url(conn, tmp_path):
 def test_enabled_depends_on_credentials(conn, monkeypatch):
     for k in ("TIKTOK_CLIENT_KEY", "TIKTOK_REFRESH_TOKEN", "INSTAGRAM_USER_ID", "INSTAGRAM_ACCESS_TOKEN"):
         monkeypatch.delenv(k, raising=False)
-    assert platforms.enabled(Settings(youtube_refresh_token=""), conn, None) == {}
+    def auto(pubs):
+        return [n for n, p in pubs.items() if not platforms.is_manual(p)]
+    pubs = platforms.enabled(Settings(youtube_refresh_token=""), conn, None)
+    assert auto(pubs) == [] and sorted(pubs) == ["instagram", "tiktok", "youtube"]  # all posted from the phone
     monkeypatch.setenv("TIKTOK_CLIENT_KEY", "k")
     monkeypatch.setenv("TIKTOK_REFRESH_TOKEN", "r")
-    assert list(platforms.enabled(Settings(youtube_refresh_token="x"), conn, MagicMock())) == ["youtube", "tiktok"]
+    assert auto(platforms.enabled(Settings(youtube_refresh_token="x"), conn, MagicMock())) == ["youtube", "tiktok"]
 
 
 # --- dashboard -------------------------------------------------------------
@@ -317,6 +320,7 @@ def html_unescape(text):
 # --- review mode -----------------------------------------------------------
 
 def _queue_for_review(conn, tmp_path, token="c" * 32):
+    db.put(conn, "auto_platforms", "youtube,tiktok")
     (tmp_path / "clips" / f"{token}.mp4").write_bytes(b"0123456789")
     cid = conn.execute(
         "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms,"
@@ -378,3 +382,95 @@ def test_media_supports_byte_ranges(server, tmp_path):
     assert err.value.code == 416
     full = urllib.request.urlopen(url, timeout=5)
     assert full.status == 200 and full.headers["Accept-Ranges"] == "bytes"
+
+
+# --- phone posting ---------------------------------------------------------
+
+def test_phone_posting_flow(server, tmp_path):
+    base, conn = server
+    cid = _queue_for_review(conn, tmp_path)
+    db.put(conn, "auto_platforms", "")  # nothing connected: everything is posted from the phone
+    _get(base + "/review/approve", "s3cret", data=f"id={cid}".encode())
+    assert {r[0] for r in conn.execute("SELECT status FROM posts")} == {"ready"}
+
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Ready to post from your phone (1)" in page
+    assert f'href="/media/{"c" * 32}.mp4?download=1"' in page and "Copy caption" in page
+    assert "Paste your YouTube post link" in page and "Paste your TikTok post link" in page
+    assert "youtube: from your phone" in page.lower()
+
+    yt_post, tt_post = [r[0] for r in conn.execute("SELECT id FROM posts ORDER BY platform DESC")]
+    bad = _get(base + "/manual/save", "s3cret", data=f"id={yt_post}&url=not-a-link".encode()).read().decode()
+    assert "Paste the full link" in bad
+    _get(base + "/manual/save", "s3cret",
+         data=urlencode({"id": yt_post, "url": "https://youtube.com/shorts/abc"}).encode())
+    _get(base + "/manual/skip", "s3cret", data=f"id={tt_post}".encode())
+    rows = dict(conn.execute("SELECT platform, status FROM posts").fetchall())
+    assert rows == {"youtube": "posted", "tiktok": "skipped"}
+    from clip_engine import pipeline
+    [pending] = pipeline.pending_submissions(conn)
+    assert pending["url"] == "https://youtube.com/shorts/abc"
+    assert not (tmp_path / "clips" / ("c" * 32 + ".mp4")).exists()  # nothing left to post: file removed
+    assert "Ready to post" not in _get(base + "/", "s3cret").read().decode()
+
+
+def test_download_header(server):
+    base, _ = server
+    resp = _get(base + "/media/" + "a" * 32 + ".mp4?download=1")
+    assert resp.headers["Content-Disposition"].startswith("attachment") and resp.read() == b"MP4DATA"
+
+
+def test_stale_clips_expire(tmp_path):
+    from clip_engine import pipeline
+    conn = db.connect(tmp_path / "x.db")
+    (tmp_path / "clips").mkdir()
+    cid = _queue_for_review(conn, tmp_path)
+    conn.execute("UPDATE posts SET status = 'ready', scheduled_at = datetime('now', '-8 days') WHERE clip_id = ?",
+                 (cid,))
+    pipeline.expire_stale(conn)
+    assert {r[0] for r in conn.execute("SELECT status FROM posts")} == {"expired"}
+    assert not (tmp_path / "clips" / ("c" * 32 + ".mp4")).exists()
+
+
+def test_manual_views_come_from_public_page(monkeypatch):
+    from clip_engine import campaigns as camp
+
+    class FakeYDL:
+        def __init__(self, url_views):
+            self.url_views = url_views
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=False):
+            if url not in self.url_views:
+                raise RuntimeError("login required")
+            return {"view_count": self.url_views[url]}
+    monkeypatch.setattr(camp, "_ydl", lambda opts: FakeYDL({"https://tiktok.com/v/1": 1234}))
+    pub = platforms.ManualPublisher("tiktok")
+    assert pub.stats(["https://tiktok.com/v/1", "https://instagram.com/reel/x"]) == {
+        "https://tiktok.com/v/1": (1234, 0), "https://instagram.com/reel/x": (0, 0)}
+    with pytest.raises(platforms.PublishError):
+        pub.publish({}, None, "")
+
+
+def test_produce_without_any_connection_makes_phone_posts(tmp_path, monkeypatch):
+    from clip_engine import pipeline
+    conn = db.connect(":memory:")
+    pubs = {p: platforms.ManualPublisher(p) for p in platforms.ALL_PLATFORMS}
+    db.put(conn, "review_mode", "off")
+    monkeypatch.setattr(pipeline, "campaign_job", lambda *a: None)
+    monkeypatch.setattr(pipeline, "archive_job", lambda *a: None)
+    # no source found → nothing made, but it no longer refuses for lack of an automatic platform
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), MagicMock(), None, pubs, 2) == 0
+
+
+def test_post_time_label():
+    from datetime import datetime, timezone
+    now = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+    assert dashboard.post_time_label("2026-10-20 19:00:00", now) == "Tue 3:00pm ET"
+    assert dashboard.post_time_label("2026-10-20 11:00:00", now) == "now"
+    assert dashboard.post_time_label(None, now) == ""

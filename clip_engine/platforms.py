@@ -275,6 +275,45 @@ class AyrsharePublisher:
         return out
 
 
+class ManualPublisher:
+    """A platform you post to yourself from your phone.
+
+    The engine prepares the clip, caption and suggested time; you upload it in the app
+    and paste the post's link back on the dashboard. Free, needs no developer app or
+    review, and lets you add trending sounds in the app. Views are read from the public
+    post page, so they still feed the strategy.
+    """
+    manual = True
+
+    def __init__(self, platform: str):
+        self.name = platform
+        self.daily_limit = 1000  # you decide what to post; the gradual start still applies
+
+    def publish(self, clip: dict, path: Path, public_url: str) -> tuple[str, str]:
+        raise PublishError(f"{self.name} is posted from your phone, not automatically")
+
+    def stats(self, ids: list[str]) -> dict[str, tuple[int, int]]:
+        from .campaigns import _ydl  # yt-dlp reads public view counts for most platforms
+
+        out = {}
+        for url in ids:
+            try:
+                with _ydl({"skip_download": True}) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                out[url] = (int(info.get("view_count") or 0), 0)
+            except Exception:
+                log.warning("could not read views for %s", url)
+                out[url] = (0, 0)
+        return out
+
+
+ALL_PLATFORMS = ("youtube", "tiktok", "instagram")
+
+
+def is_manual(publisher) -> bool:
+    return getattr(publisher, "manual", False)
+
+
 def enabled(settings: Settings, conn: sqlite3.Connection, yt) -> dict:
     """Publishers whose credentials are configured, by name."""
     pubs = {}
@@ -296,6 +335,9 @@ def enabled(settings: Settings, conn: sqlite3.Connection, yt) -> dict:
         for platform in (p.strip() for p in wanted):
             if platform in limits and platform not in pubs:
                 pubs[platform] = AyrsharePublisher(platform, os.environ["AYRSHARE_API_KEY"], limits[platform])
+    # Anything not connected for automatic posting is posted from your phone.
+    for platform in ALL_PLATFORMS:
+        pubs.setdefault(platform, ManualPublisher(platform))
     return pubs
 
 

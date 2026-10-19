@@ -5,6 +5,7 @@ POST /pause, /resume   stop or restart posting and production
 POST /run              start a production cycle on the next tick
 POST /submitted        mark all pending campaign links as submitted
 POST /review/approve, /review/reject, /review/approve-all   decide on clips waiting for review
+POST /manual/save, /manual/skip   record (or skip) a clip you posted yourself from your phone
 POST /settings/review, /settings/ramp   switch review mode / gradual start on or off
 POST /campaigns/save   add or update a campaign from the form
 POST /campaigns/toggle pause or resume one campaign
@@ -20,7 +21,8 @@ import logging
 import re
 import threading
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -74,6 +76,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 <h1>Clip Engine <span class="{state_class}">&middot; {state}</span></h1>
 {banner}
 {review}
+{ready}
 <section><div class="row">
 <div class="stat"><b>${earned}</b><span>estimated earnings</span></div>
 <div class="stat"><b>{views}</b><span>total views</span></div>
@@ -220,11 +223,90 @@ def _review(conn, settings: Settings) -> str:
             f'{"".join(cards)}{approve_all}</section>')
 
 
+COPY_JS = """<script>
+function copyText(id, btn) {
+  const el = document.getElementById(id);
+  const done = () => { const t = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = t, 1500); };
+  if (navigator.clipboard) { navigator.clipboard.writeText(el.value).then(done, () => { el.select(); document.execCommand('copy'); done(); }); }
+  else { el.select(); document.execCommand('copy'); done(); }
+}
+</script>"""
+
+APP_TIPS = {
+    "youtube": "YouTube app: + → Short → upload the video, paste the title, then paste the caption as the description.",
+    "tiktok": "TikTok app: + → Upload → pick the video. Add a trending sound if you like, keeping it quiet under the "
+              "speech, then paste the caption. If it's a paid campaign, switch on Content disclosure → Paid partnership.",
+    "instagram": "Instagram app: + → Reel → pick the video. Add a trending sound if you like, keeping it quiet, then "
+                 "paste the caption. If it's a paid campaign, add the Paid partnership label.",
+}
+
+
+def post_time_label(scheduled_at: str | None, now: datetime | None = None) -> str:
+    """'now', or e.g. 'Tue 3:00pm ET' for a UTC timestamp from the database."""
+    if not scheduled_at:
+        return ""
+    when = datetime.fromisoformat(scheduled_at).replace(tzinfo=timezone.utc)
+    if when <= (now or datetime.now(timezone.utc)):
+        return "now"
+    local = when.astimezone(ZoneInfo("America/New_York"))
+    return local.strftime("%a %-I:%M%p").replace("AM", "am").replace("PM", "pm") + " ET"
+
+
+def _ready(conn, settings: Settings) -> str:
+    """Approved clips for you to post from your phone, with copy buttons and a link box per platform."""
+    clips = pipeline.ready_to_post(conn)
+    if not clips:
+        return ""
+    e = html.escape
+    names = {c.id: c.name for c in campaigns.load(settings.data_dir)}
+    cards = []
+    for c in clips:
+        cid = c["id"]
+        when = post_time_label(c["scheduled_at"])
+        platforms_html = []
+        for p in c["posts"]:
+            name = PLATFORM_NAMES.get(p["platform"], p["platform"])
+            platforms_html.append(
+                f'<div class="card"><b>{name}</b><div class="muted">{e(APP_TIPS.get(p["platform"], ""))}</div>'
+                f'<form method="post" action="/manual/save" class="row" style="margin-top:6px">'
+                f'<input type="hidden" name="id" value="{p["id"]}">'
+                f'<input type="url" name="url" required placeholder="Paste your {name} post link" style="flex:1 1 200px">'
+                f'<button class="primary">Save link</button></form>'
+                f'<form method="post" action="/manual/skip" style="margin-top:6px"><input type="hidden" name="id" '
+                f'value="{p["id"]}"><button>Not posting on {name}</button></form></div>')
+        caption = c["description"]
+        cards.append(
+            f'<div class="card"><b>{e(c["title"])}</b>'
+            f'<div class="muted">{e(names.get(c["campaign_id"], c["campaign_id"] or "archive"))}'
+            f'{" &middot; best time to post: " + when if when else ""}</div>'
+            f'<video controls playsinline preload="metadata" src="/media/{e(c["media_token"])}.mp4"></video>'
+            f'<div class="row"><a class="button" href="/media/{e(c["media_token"])}.mp4?download=1" '
+            f'download="clip-{cid}.mp4">Download video</a></div>'
+            f'<p class="muted" style="font-size:13px">iPhone: if the download doesn\'t go to Photos, open the '
+            f'video, tap Share, then Save Video.</p>'
+            f'<label>Title <small>for YouTube</small></label>'
+            f'<div class="row"><input type="text" id="title-{cid}" readonly value="{e(c["title"])}" style="flex:1 1 200px">'
+            f'<button type="button" onclick="copyText(\'title-{cid}\', this)">Copy</button></div>'
+            f'<label>Caption <small>includes the hashtags, required tags and #ad</small></label>'
+            f'<textarea id="caption-{cid}" readonly>{e(caption)}</textarea>'
+            f'<div class="row"><button type="button" onclick="copyText(\'caption-{cid}\', this)">Copy caption</button></div>'
+            f'{"".join(platforms_html)}</div>')
+    return (f'<section id="ready"><h2>Ready to post from your phone ({len(clips)})</h2>'
+            f'<p class="muted">Download the video, post it in each app with the caption, then paste the post\'s link '
+            f'here so the engine can track its views. Unposted clips are dropped after 7 days.</p>'
+            f'{"".join(cards)}{COPY_JS}</section>')
+
+
 def _settings(conn, settings: Settings) -> str:
+    auto = pipeline.auto_platforms(conn)
+    modes = ", ".join(f"{name}: {'automatic' if key in auto else 'from your phone'}"
+                      for key, name in PLATFORM_NAMES.items())
     review_on = pipeline.review_mode(conn)
     ramp_on = db.get(conn, "ramp", "on") == "on"
     limit = pipeline.daily_clip_limit(conn, settings)
     return (
+        f'<div class="card"><b>Posting:</b> {html.escape(modes)}<div class="muted">A platform switches to '
+        f'automatic when its posting connection is added in Railway.</div></div>'
         f'<div class="card"><b>Review clips before posting:</b> '
         f'{"<span class=good>on</span>" if review_on else "<span class=bad>off</span>"}'
         f'<div class="muted">On: every clip waits for you to approve it. Off: clips post automatically.</div>'
@@ -279,6 +361,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
     return PAGE.format(
         banner=banner,
         review=_review(conn, settings),
+        ready=_ready(conn, settings),
         settings_html=_settings(conn, settings),
         campaigns=_campaign_rows(settings),
         campaign_form=_campaign_form(form_values, editing=bool(form_values and form_values.get("id")),
@@ -337,13 +420,13 @@ def make_handler(settings: Settings):
         def do_GET(self):
             if self.path == "/health":
                 return self._send(200, b"ok", "text/plain")
-            match = MEDIA_RE.match(self.path)
+            url = urlsplit(self.path)
+            match = MEDIA_RE.match(url.path)
             if match:
                 path = media_dir / f"{match.group(1)}.mp4"
                 if not path.exists():
                     return self._send(404, b"not found", "text/plain")
-                return self._send_video(path)
-            url = urlsplit(self.path)
+                return self._send_video(path, download="download=1" in url.query)
             if url.path != "/":
                 return self._send(404, b"not found", "text/plain")
             if not self._authorized():
@@ -351,7 +434,7 @@ def make_handler(settings: Settings):
             query = {k: v[0] for k, v in parse_qs(url.query).items()}
             self._page(notice=query.get("notice", ""), edit_id=query.get("edit", ""))
 
-        def _send_video(self, path) -> None:
+        def _send_video(self, path, download: bool = False) -> None:
             """Serve a clip, honouring byte ranges (iPhones won't play video without them)."""
             size = path.stat().st_size
             start, end = 0, size - 1
@@ -372,6 +455,8 @@ def make_handler(settings: Settings):
             else:
                 self.send_response(200)
             self.send_header("Content-Type", "video/mp4")
+            if download:
+                self.send_header("Content-Disposition", 'attachment; filename="clip.mp4"')
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(end - start + 1))
             self.end_headers()
@@ -423,6 +508,16 @@ def make_handler(settings: Settings):
                 elif self.path in ("/review/approve", "/review/reject"):
                     clip_id = int(self._form().get("id", ["0"])[0] or 0)
                     (pipeline.approve if self.path.endswith("approve") else pipeline.reject)(conn, clip_id)
+                elif self.path in ("/manual/save", "/manual/skip"):
+                    form = self._form()
+                    post_id = int(form.get("id", ["0"])[0] or 0)
+                    if self.path == "/manual/skip":
+                        pipeline.skip_manual_post(conn, post_id)
+                    else:
+                        try:
+                            pipeline.save_manual_post(conn, post_id, form.get("url", [""])[0])
+                        except ValueError as exc:
+                            return self._page(error=str(exc))
                 elif self.path == "/review/approve-all":
                     for c in pipeline.awaiting_review(conn):
                         pipeline.approve(conn, c["id"])

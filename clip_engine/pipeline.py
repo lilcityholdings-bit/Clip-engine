@@ -20,7 +20,7 @@ import anthropic
 from . import ai, campaigns, db, media, moments, sources, strategy, trends
 from .config import Settings
 from .db import clips_today, posts_today
-from .platforms import PublishError, next_slot
+from .platforms import PublishError, is_manual, next_slot
 from .youtube import YouTube
 
 log = logging.getLogger(__name__)
@@ -198,11 +198,62 @@ def awaiting_review(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def auto_platforms(conn: sqlite3.Connection) -> set[str]:
+    """Platforms connected for automatic posting (recorded at startup); the rest are posted by hand."""
+    return set(filter(None, (db.get(conn, "auto_platforms") or "").split(",")))
+
+
 def approve(conn: sqlite3.Connection, clip_id: int) -> None:
-    """Queue a reviewed clip: keep its scheduled slot if it's still ahead, otherwise post now."""
-    conn.execute("UPDATE posts SET status = 'queued', scheduled_at = MAX(scheduled_at, datetime('now'))"
-                 " WHERE clip_id = ? AND status = 'review'", (clip_id,))
+    """Approve a reviewed clip. Automatic platforms are queued (keeping the scheduled slot if it's
+    still ahead); phone-posted platforms move to "Ready to post"."""
+    auto = auto_platforms(conn)
+    for post_id, platform in conn.execute("SELECT id, platform FROM posts WHERE clip_id = ? AND status = 'review'",
+                                          (clip_id,)).fetchall():
+        if platform in auto:
+            conn.execute("UPDATE posts SET status = 'queued', scheduled_at = MAX(scheduled_at, datetime('now'))"
+                         " WHERE id = ?", (post_id,))
+        else:
+            conn.execute("UPDATE posts SET status = 'ready' WHERE id = ?", (post_id,))
     conn.commit()
+
+
+def ready_to_post(conn: sqlite3.Connection) -> list[dict]:
+    """Approved clips waiting for you to post them from your phone, with their open posts."""
+    rows = conn.execute(
+        "SELECT c.id, c.title, c.description, c.campaign_id, c.media_token, c.hook_text, p.id AS post_id,"
+        " p.platform, p.scheduled_at FROM clips c JOIN posts p ON p.clip_id = c.id WHERE p.status = 'ready'"
+        " ORDER BY p.scheduled_at, c.id, p.platform").fetchall()
+    clips: dict[int, dict] = {}
+    for r in rows:
+        clip = clips.setdefault(r["id"], {k: r[k] for k in ("id", "title", "description", "campaign_id",
+                                                              "media_token", "hook_text", "scheduled_at")} | {"posts": []})
+        clip["posts"].append({"id": r["post_id"], "platform": r["platform"]})
+    return list(clips.values())
+
+
+def save_manual_post(conn: sqlite3.Connection, post_id: int, url: str) -> None:
+    """Record the link of a clip you posted yourself; views are tracked from it."""
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("Paste the full link to your post (starting with https://).")
+    conn.execute("UPDATE posts SET status = 'posted', url = ?, external_id = ?, posted_at = datetime('now'),"
+                 " error = NULL WHERE id = ? AND status = 'ready'", (url, url, post_id))
+    conn.commit()
+    cleanup_files(conn)
+
+
+def skip_manual_post(conn: sqlite3.Connection, post_id: int) -> None:
+    conn.execute("UPDATE posts SET status = 'skipped' WHERE id = ? AND status = 'ready'", (post_id,))
+    conn.commit()
+    cleanup_files(conn)
+
+
+def expire_stale(conn: sqlite3.Connection, days: int = 7) -> None:
+    """Clips nobody posted within a week are dropped, so old files don't fill the disk."""
+    conn.execute("UPDATE posts SET status = 'expired' WHERE status IN ('ready', 'review')"
+                 " AND scheduled_at < datetime('now', ?)", (f"-{days} days",))
+    conn.commit()
+    cleanup_files(conn)
 
 
 def reject(conn: sqlite3.Connection, clip_id: int) -> None:
@@ -300,8 +351,10 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                  compose_description(clip, job.footer), json.dumps(clip["tags"]), json.dumps(arms),
                  str(out), token, clip.get("score"), clip.get("hook_text", "")),
             )
-            status = "review" if review_mode(conn) else "queued"
+            reviewing = review_mode(conn)
             for platform in platforms:
+                manual = is_manual(publishers.get(platform))
+                status = "review" if reviewing else ("ready" if manual else "queued")
                 conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, ?, ?, ?)",
                              (cur.lastrowid, platform, status, slot))
             conn.commit()
@@ -352,7 +405,7 @@ def publish_due(conn: sqlite3.Connection, settings: Settings, publishers: dict) 
         conn.commit()
         posted += 1
         log.info("posted clip %s to %s: %s", row["clip_id"], row["platform"], url)
-    cleanup_files(conn)
+    expire_stale(conn)
     return posted
 
 
@@ -360,7 +413,7 @@ def cleanup_files(conn: sqlite3.Connection) -> None:
     """Delete rendered files once no post of that clip is still queued."""
     rows = conn.execute(
         "SELECT id, file_path FROM clips WHERE file_path IS NOT NULL AND NOT EXISTS"
-        " (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status IN ('queued', 'review'))"
+        " (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status IN ('queued', 'review', 'ready'))"
     ).fetchall()
     for r in rows:
         Path(r["file_path"]).unlink(missing_ok=True)
@@ -373,7 +426,7 @@ def score(conn: sqlite3.Connection, settings: Settings, publishers: dict) -> int
     cutoff = (datetime.utcnow() - timedelta(hours=settings.score_after_hours)).strftime("%Y-%m-%d %H:%M:%S")
     clips = conn.execute(
         "SELECT id, arms, campaign_id FROM clips WHERE scored_at IS NULL"
-        " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status IN ('queued', 'review'))"
+        " AND NOT EXISTS (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status IN ('queued', 'review', 'ready'))"
         " AND EXISTS (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status = 'posted')"
         " AND (SELECT MIN(posted_at) FROM posts WHERE posts.clip_id = clips.id AND status = 'posted') <= ?",
         (cutoff,),
@@ -412,10 +465,12 @@ def score(conn: sqlite3.Connection, settings: Settings, publishers: dict) -> int
 
 def refresh_views(conn: sqlite3.Connection, publishers: dict, days: int = 30) -> None:
     """Keep view counts on recent posts current for the dashboard and earnings."""
-    posts = conn.execute("SELECT id, platform, external_id FROM posts WHERE status = 'posted'"
-                         " AND posted_at >= datetime('now', ?)", (f"-{days} days",)).fetchall()
+    posts = conn.execute("SELECT id, platform, external_id, posted_at >= datetime('now', '-3 days') AS fresh"
+                         " FROM posts WHERE status = 'posted' AND posted_at >= datetime('now', ?)",
+                         (f"-{days} days",)).fetchall()
     for platform, pub in publishers.items():
-        mine = [p for p in posts if p["platform"] == platform]
+        # Phone posts are read from public pages one by one, so only the newest are refreshed hourly.
+        mine = [p for p in posts if p["platform"] == platform and (p["fresh"] or not is_manual(pub))]
         if not mine:
             continue
         try:
