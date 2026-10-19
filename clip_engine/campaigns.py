@@ -1,7 +1,8 @@
 """Clipping campaigns: creators who pay per view for clips of their videos.
 
-Campaigns are configured as JSON (CAMPAIGNS_JSON env var or campaigns.json in
-DATA_DIR), one object per campaign you've been accepted into:
+Campaigns are normally added from the dashboard's "Add campaign" form, which saves
+them to campaigns.json in DATA_DIR. They can also be set as JSON in the
+CAMPAIGNS_JSON env var, one object per campaign you've been accepted into:
 
 [
   {
@@ -28,7 +29,8 @@ right to repost the creator's content.
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+import re
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -62,14 +64,99 @@ class Campaign:
         return self.active and (not self.ends_on or date.fromisoformat(self.ends_on) >= today)
 
 
-def load(data_dir: Path) -> list[Campaign]:
+PLATFORMS = ("youtube", "tiktok", "instagram")
+
+
+def _from_env() -> list[Campaign]:
     raw = os.environ.get("CAMPAIGNS_JSON")
+    return [Campaign(**c) for c in json.loads(raw)] if raw else []
+
+
+def _from_file(data_dir: Path) -> list[Campaign]:
     path = data_dir / "campaigns.json"
-    if not raw and path.exists():
-        raw = path.read_text()
-    if not raw:
-        return []
-    return [Campaign(**c) for c in json.loads(raw)]
+    return [Campaign(**c) for c in json.loads(path.read_text())] if path.exists() else []
+
+
+def load(data_dir: Path) -> list[Campaign]:
+    """Campaigns added from the dashboard (campaigns.json in DATA_DIR) plus any set in CAMPAIGNS_JSON.
+    A dashboard campaign with the same id replaces the environment one."""
+    saved = _from_file(data_dir)
+    ids = {c.id for c in saved}
+    return saved + [c for c in _from_env() if c.id not in ids]
+
+
+def env_ids() -> set[str]:
+    """Campaigns defined in the CAMPAIGNS_JSON setting, which the dashboard can't delete."""
+    return {c.id for c in _from_env()}
+
+
+def save(data_dir: Path, campaign: Campaign) -> None:
+    """Add or replace one dashboard-managed campaign."""
+    saved = [c for c in _from_file(data_dir) if c.id != campaign.id] + [campaign]
+    _write(data_dir, saved)
+
+
+def remove(data_dir: Path, campaign_id: str) -> None:
+    _write(data_dir, [c for c in _from_file(data_dir) if c.id != campaign_id])
+
+
+def _write(data_dir: Path, campaigns: list[Campaign]) -> None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / "campaigns.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps([asdict(c) for c in campaigns], indent=2))
+    tmp.replace(path)
+
+
+def slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40]
+
+
+class CampaignError(ValueError):
+    """A form value that can't be used, worded for the person filling in the form."""
+
+
+def from_form(form: dict[str, str], platforms: list[str]) -> Campaign:
+    """Build a campaign from the dashboard form, or raise CampaignError explaining what to fix."""
+    name = form.get("name", "").strip()
+    if not name or not slug(name):
+        raise CampaignError("Give the campaign a name.")
+    program_url = form.get("program_url", "").strip()
+    if not program_url.startswith(("http://", "https://")):
+        raise CampaignError("Paste the campaign's page link (starting with https://).")
+    try:
+        rate = float(form.get("rate", "").replace("$", "").strip())
+    except ValueError:
+        raise CampaignError("Pay per 1,000 views must be a number, like 1.50.")
+    if not 0 < rate < 1000:
+        raise CampaignError("Pay per 1,000 views must be more than 0.")
+    sources = [s.strip() for s in re.split(r"[\s,]+", form.get("sources", "")) if s.strip()]
+    bad = [s for s in sources if not s.startswith(("http://", "https://"))]
+    if not sources or bad:
+        raise CampaignError("Add at least one link to the creator's channel, playlist or videos (each starting with https://).")
+    chosen = [p for p in platforms if p in PLATFORMS]
+    if not chosen:
+        raise CampaignError("Pick at least one platform the campaign pays for.")
+    ends_on = form.get("ends_on", "").strip() or None
+    if ends_on:
+        try:
+            date.fromisoformat(ends_on)
+        except ValueError:
+            raise CampaignError("End date must look like 2026-12-31.")
+    return Campaign(
+        id=form.get("id", "").strip() or slug(name),
+        name=name,
+        program_url=program_url,
+        rate_per_1k_views=rate,
+        sources=sources,
+        caption_required=form.get("caption_required", "").strip(),
+        rules=form.get("rules", "").strip(),
+        platforms=chosen,
+        niche=form.get("niche", "").strip(),
+        allow_music=form.get("allow_music") == "on",
+        active=form.get("active", "on") == "on",
+        ends_on=ends_on,
+    )
 
 
 def live(campaigns: list[Campaign]) -> list[Campaign]:

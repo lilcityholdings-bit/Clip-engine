@@ -124,8 +124,11 @@ def server(tmp_path):
     srv.shutdown()
 
 
-def _get(url, password=None, data=None):
+def _get(url, password=None, data=None, origin="same"):
     req = urllib.request.Request(url, data=data, method="POST" if data is not None else "GET")
+    if data is not None and origin:
+        host = url.split("/")[2]
+        req.add_header("Origin", f"http://{host}" if origin == "same" else origin)
     if password:
         req.add_header("Authorization", "Basic " + base64.b64encode(f"me:{password}".encode()).decode())
     return urllib.request.urlopen(req, timeout=5)
@@ -219,3 +222,93 @@ def test_dashboard_shows_trends(tmp_path):
                                          '"title_patterns": [], "sounds": ["sped-up pop <b>"], "notes": "hot"}}')
     page = dashboard.render(conn, settings)
     assert "money podcast" in page and "#moneytok" in page and "sped-up pop &lt;b&gt;" in page
+
+
+# --- campaign form ---------------------------------------------------------
+
+from urllib.parse import urlencode  # noqa: E402
+
+from clip_engine import campaigns  # noqa: E402
+
+FORM = {"name": "Deep Talk Podcast", "program_url": "https://whop.com/deep-talk", "rate": "$1.50",
+        "sources": "https://www.youtube.com/@deeptalk/videos\nhttps://drive.google.com/file/d/abc",
+        "caption_required": "@deeptalk #deeptalk", "rules": "No sponsor reads.", "niche": "money podcast",
+        "allow_music": "on", "active": "on", "ends_on": ""}
+
+
+def _post_form(base, path, fields, platforms=("youtube", "tiktok")):
+    body = urlencode(list(fields.items()) + [("platforms", p) for p in platforms]).encode()
+    return _get(base + path, "s3cret", data=body)
+
+
+def test_add_edit_pause_delete_campaign(server, tmp_path, monkeypatch):
+    monkeypatch.delenv("CAMPAIGNS_JSON", raising=False)
+    base, _ = server
+    page = _post_form(base, "/campaigns/save", FORM).read().decode()  # follows the redirect
+    assert "Campaign Deep Talk Podcast added" in page
+    [c] = campaigns.load(tmp_path)
+    assert (c.id, c.rate_per_1k_views, c.platforms) == ("deep-talk-podcast", 1.5, ["youtube", "tiktok"])
+    assert c.sources == ["https://www.youtube.com/@deeptalk/videos", "https://drive.google.com/file/d/abc"]
+    assert c.allow_music and c.active and c.niche == "money podcast"
+
+    edit = _get(base + "/?edit=deep-talk-podcast", "s3cret").read().decode()
+    assert "Edit campaign" in edit and 'value="1.5"' in edit and "No sponsor reads." in edit
+
+    _post_form(base, "/campaigns/save", {**FORM, "id": "deep-talk-podcast", "rate": "2", "allow_music": "off"},
+               platforms=("instagram",))
+    [c] = campaigns.load(tmp_path)
+    assert (c.rate_per_1k_views, c.platforms, c.allow_music) == (2.0, ["instagram"], False)
+
+    _get(base + "/campaigns/toggle", "s3cret", data=b"id=deep-talk-podcast")
+    assert campaigns.load(tmp_path)[0].active is False
+    assert campaigns.live(campaigns.load(tmp_path)) == []
+    _get(base + "/campaigns/delete", "s3cret", data=b"id=deep-talk-podcast")
+    assert campaigns.load(tmp_path) == []
+
+
+@pytest.mark.parametrize("change,message", [
+    ({"name": ""}, "name"),
+    ({"program_url": "whop.com/x"}, "campaign's page link"),
+    ({"rate": "lots"}, "must be a number"),
+    ({"rate": "0"}, "more than 0"),
+    ({"sources": "not a link"}, "creator's channel"),
+    ({"ends_on": "next week"}, "2026-12-31"),
+])
+def test_form_errors_keep_what_was_typed(server, tmp_path, change, message):
+    base, _ = server
+    page = _post_form(base, "/campaigns/save", {**FORM, **change}).read().decode()
+    assert message in html_unescape(page)
+    assert campaigns.load(tmp_path) == []
+    if "rules" not in change:
+        assert "No sponsor reads." in page  # the form is refilled
+
+
+def test_form_needs_a_platform(server, tmp_path):
+    base, _ = server
+    page = _post_form(base, "/campaigns/save", FORM, platforms=()).read().decode()
+    assert "at least one platform" in page
+
+
+def test_posts_from_other_sites_are_rejected(server, tmp_path):
+    base, _ = server
+    for origin in ("https://evil.example", None):
+        with pytest.raises(urllib.error.HTTPError) as err:
+            _get(base + "/campaigns/save", "s3cret", data=urlencode(FORM).encode(), origin=origin)
+        assert err.value.code == 403
+    assert campaigns.load(tmp_path) == []
+
+
+def test_env_campaigns_show_but_cannot_be_deleted(server, tmp_path, monkeypatch):
+    monkeypatch.setenv("CAMPAIGNS_JSON", '[{"id": "envpod", "name": "Env Pod", "program_url": "https://w.example",'
+                                         ' "rate_per_1k_views": 1, "sources": ["https://y.example"]}]')
+    base, _ = server
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Env Pod" in page and "/campaigns/delete" not in page
+    with pytest.raises(urllib.error.HTTPError):
+        _get(base + "/campaigns/delete", "s3cret", data=b"id=envpod")
+    assert [c.id for c in campaigns.load(tmp_path)] == ["envpod"]
+
+
+def html_unescape(text):
+    import html
+    return html.unescape(text)

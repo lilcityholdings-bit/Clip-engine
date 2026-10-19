@@ -6,8 +6,8 @@ A fully automated clipping business. It finds long videos, cuts the best moments
 
 1. **Ayrshare** (ayrshare.com): sign up on a plan that includes API access and video. Connect your YouTube, TikTok and Instagram accounts in their app, then copy your API key. Ayrshare is already approved by all three platforms, so no developer apps or platform reviews are needed.
 2. **Claude API key**: console.anthropic.com → API Keys.
-3. **Campaigns**: join 1–3 clipping campaigns (e.g. on Whop) and note each one's pay rate, the creator's channel link, required tags and rules.
-4. **Railway**: deploy this repo, add a volume at `/data`, generate a domain, and set only these variables: `ANTHROPIC_API_KEY`, `AYRSHARE_API_KEY`, `PUBLIC_BASE_URL`, `DASHBOARD_PASSWORD`, `CAMPAIGNS_JSON`, `DATA_DIR=/data`.
+3. **Campaigns**: join 1–3 clipping campaigns (e.g. on Whop), then add each one on the dashboard with **Add a campaign**: name, campaign link, pay per 1,000 views, the creator's channel links, required caption tags, the creator's rules and which platforms it pays for. Campaigns can be edited, paused or deleted there too.
+4. **Railway**: deploy this repo, add a volume at `/data`, generate a domain, and set only these variables: `ANTHROPIC_API_KEY`, `AYRSHARE_API_KEY`, `PUBLIC_BASE_URL`, `DASHBOARD_PASSWORD`, `DATA_DIR=/data`.
 
 That's it. The direct YouTube, TikTok and Instagram connections described further down are optional. They save Ayrshare's fee, but each needs a developer app and a platform review.
 
