@@ -1,11 +1,17 @@
 """YouTube Data API and Analytics API access for one channel."""
+import dataclasses
+import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
+
+import requests
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+from . import db
 from .config import Settings
 
 SCOPES = [
@@ -14,6 +20,47 @@ SCOPES = [
     "https://www.googleapis.com/auth/yt-analytics.readonly",
 ]
 CATEGORY_EDUCATION = "27"
+AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+
+def redirect_uri(settings: Settings) -> str:
+    """Where Google sends the person back after they approve access. Register this exact
+    address as an authorized redirect URI on the OAuth client."""
+    return f"{settings.public_base_url}/oauth/youtube/callback"
+
+
+def authorize_url(settings: Settings, state: str) -> str:
+    return AUTH_URL + "?" + urlencode({
+        "client_id": settings.youtube_client_id, "redirect_uri": redirect_uri(settings), "response_type": "code",
+        "scope": " ".join(SCOPES), "access_type": "offline", "prompt": "consent", "state": state,
+    })
+
+
+def exchange_code(settings: Settings, code: str, http=None) -> str:
+    """Trade the one-time code from Google for a long-lived refresh token."""
+    resp = (http or requests).post(TOKEN_URL, data={
+        "code": code, "client_id": settings.youtube_client_id, "client_secret": settings.youtube_client_secret,
+        "redirect_uri": redirect_uri(settings), "grant_type": "authorization_code"}, timeout=30)
+    data = resp.json()
+    if "refresh_token" not in data:
+        raise ValueError(data.get("error_description") or data.get("error") or "Google didn't return a login token")
+    return data["refresh_token"]
+
+
+def stored_token(conn: sqlite3.Connection, settings: Settings) -> str:
+    """The refresh token saved by the dashboard's Connect YouTube button, else the environment one."""
+    return db.get(conn, "youtube_refresh_token") or settings.youtube_refresh_token
+
+
+def auto_posting_on(conn: sqlite3.Connection) -> bool:
+    """YouTube only posts automatically once you've switched it on, after Google approves the project.
+    Before that, API uploads are kept private, so clips are better posted from the app."""
+    return db.get(conn, "youtube_auto") == "on"
+
+
+def effective_settings(conn: sqlite3.Connection, settings: Settings) -> Settings:
+    return dataclasses.replace(settings, youtube_refresh_token=stored_token(conn, settings))
 
 
 def credentials(settings: Settings) -> Credentials:

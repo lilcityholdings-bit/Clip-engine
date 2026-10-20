@@ -105,6 +105,9 @@ def test_enabled_depends_on_credentials(conn, monkeypatch):
     assert auto(pubs) == [] and sorted(pubs) == ["instagram", "tiktok", "youtube"]  # all posted from the phone
     monkeypatch.setenv("TIKTOK_CLIENT_KEY", "k")
     monkeypatch.setenv("TIKTOK_REFRESH_TOKEN", "r")
+    # Connected but not switched on: YouTube stays a phone platform until Google approves the project.
+    assert auto(platforms.enabled(Settings(youtube_refresh_token="x"), conn, MagicMock())) == ["tiktok"]
+    db.put(conn, "youtube_auto", "on")
     assert auto(platforms.enabled(Settings(youtube_refresh_token="x"), conn, MagicMock())) == ["youtube", "tiktok"]
 
 
@@ -474,3 +477,145 @@ def test_post_time_label():
     assert dashboard.post_time_label("2026-10-20 19:00:00", now) == "Tue 3:00pm ET"
     assert dashboard.post_time_label("2026-10-20 11:00:00", now) == "now"
     assert dashboard.post_time_label(None, now) == ""
+
+
+# --- Connect YouTube -------------------------------------------------------
+
+from urllib.parse import parse_qs, urlsplit  # noqa: E402
+
+from clip_engine import youtube  # noqa: E402
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _raw(url, password="s3cret"):
+    """GET without following redirects; returns (status, location)."""
+    req = urllib.request.Request(url)
+    if password:
+        req.add_header("Authorization", "Basic " + base64.b64encode(f"me:{password}".encode()).decode())
+    try:
+        resp = urllib.request.build_opener(_NoRedirect).open(req, timeout=5)
+        return resp.status, resp.headers.get("Location")
+    except urllib.error.HTTPError as err:
+        return err.code, err.headers.get("Location")
+
+
+@pytest.fixture
+def yt_server(tmp_path):
+    settings = Settings(data_dir=tmp_path, dashboard_password="s3cret", port=0, youtube_client_id="cid",
+                        youtube_client_secret="csecret", public_base_url="https://engine.example",
+                        youtube_refresh_token="")
+    conn = db.connect(settings.db_path)
+    from http.server import ThreadingHTTPServer
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), dashboard.make_handler(settings))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}", conn, settings
+    srv.shutdown()
+
+
+def test_authorize_url_asks_for_offline_access():
+    settings = Settings(youtube_client_id="cid", public_base_url="https://engine.example")
+    q = parse_qs(urlsplit(youtube.authorize_url(settings, "st8")).query)
+    assert q["client_id"] == ["cid"] and q["state"] == ["st8"]
+    assert q["redirect_uri"] == ["https://engine.example/oauth/youtube/callback"]
+    assert q["access_type"] == ["offline"] and q["prompt"] == ["consent"]
+    assert "youtube.upload" in q["scope"][0]
+
+
+def test_exchange_code_returns_refresh_token_or_explains():
+    settings = Settings(youtube_client_id="cid", youtube_client_secret="sec", public_base_url="https://e.example")
+    http = MagicMock()
+    http.post.return_value = _resp({"access_token": "a", "refresh_token": "R"})
+    assert youtube.exchange_code(settings, "code1", http) == "R"
+    assert http.post.call_args.kwargs["data"]["grant_type"] == "authorization_code"
+    http.post.return_value = _resp({"error": "invalid_grant", "error_description": "Bad code"})
+    with pytest.raises(ValueError, match="Bad code"):
+        youtube.exchange_code(settings, "x", http)
+
+
+def test_connect_youtube_end_to_end(yt_server, monkeypatch):
+    base, conn, settings = yt_server
+    monkeypatch.setattr(youtube, "exchange_code", lambda s, code, http=None: f"refresh-for-{code}")
+    status, location = _raw(base + "/connect/youtube")
+    assert status == 302 and location.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+    state = parse_qs(urlsplit(location).query)["state"][0]
+    assert db.get(conn, "youtube_oauth_state") == state
+
+    status, location = _raw(f"{base}/oauth/youtube/callback?code=abc&state={state}")
+    assert status == 303 and "YouTube+connected" in location
+    assert db.get(conn, "youtube_refresh_token") == "refresh-for-abc"
+    assert youtube.stored_token(conn, settings) == "refresh-for-abc"
+    assert youtube.effective_settings(conn, settings).youtube_refresh_token == "refresh-for-abc"
+    assert not youtube.auto_posting_on(conn)  # connected, but still a phone platform
+
+    # the state is single use
+    status, location = _raw(f"{base}/oauth/youtube/callback?code=abc&state={state}")
+    assert "expired" in location
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "YouTube connection:" in page and "connected" in page
+
+
+def test_connect_rejects_wrong_state_denial_and_strangers(yt_server, monkeypatch):
+    base, conn, _ = yt_server
+    monkeypatch.setattr(youtube, "exchange_code", lambda *a, **k: "never")
+    _raw(base + "/connect/youtube")
+    status, location = _raw(base + "/oauth/youtube/callback?code=abc&state=forged")
+    assert "expired" in location and db.get(conn, "youtube_refresh_token") is None
+    state = parse_qs(urlsplit(_raw(base + "/connect/youtube")[1]).query)["state"][0]
+    status, location = _raw(f"{base}/oauth/youtube/callback?error=access_denied&state={state}")
+    assert "access_denied" in location and db.get(conn, "youtube_refresh_token") is None
+    assert _raw(base + "/connect/youtube", password=None)[0] == 401
+    assert _raw(base + "/oauth/youtube/callback?code=a&state=b", password=None)[0] == 401
+
+
+def test_exchange_failure_is_reported(yt_server, monkeypatch):
+    base, conn, _ = yt_server
+
+    def boom(*a, **k):
+        raise ValueError("redirect_uri_mismatch")
+    monkeypatch.setattr(youtube, "exchange_code", boom)
+    state = parse_qs(urlsplit(_raw(base + "/connect/youtube")[1]).query)["state"][0]
+    _, location = _raw(f"{base}/oauth/youtube/callback?code=abc&state={state}")
+    assert "redirect_uri_mismatch" in location and db.get(conn, "youtube_refresh_token") is None
+
+
+def test_youtube_card_guides_setup_and_toggle(yt_server, tmp_path):
+    base, conn, _ = yt_server
+    assert "Connect YouTube</a>" in _get(base + "/", "s3cret").read().decode()
+    db.put(conn, "youtube_refresh_token", "R")
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Automatic posting: off" in page and "Google approved us" in page
+    _get(base + "/settings/youtube-auto", "s3cret", data=b"")
+    assert youtube.auto_posting_on(db.connect(tmp_path / "clip_engine.db"))
+
+
+def test_card_explains_missing_google_keys(server):
+    base, _ = server
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "YOUTUBE_CLIENT_ID" in page and "/oauth/youtube/callback" in page
+
+
+def test_privacy_page_is_public(server):
+    base, _ = server
+    page = _get(base + "/privacy").read().decode()
+    assert "privacy policy" in page and "Limited Use" in page
+
+
+def test_main_rebuilds_publishers_after_connect(tmp_path, monkeypatch):
+    from clip_engine import __main__ as m
+    settings = Settings(data_dir=tmp_path, youtube_client_id="c", youtube_client_secret="s", youtube_refresh_token="")
+    conn = db.connect(settings.db_path)
+    monkeypatch.setattr(m, "YouTube", lambda s: MagicMock(name="yt"))
+    before = m.connection_signature(conn, settings)
+    _, yt, pubs = m.build_publishers(conn, settings)
+    assert yt is None and platforms.is_manual(pubs["youtube"])
+    db.put(conn, "youtube_refresh_token", "R")
+    assert m.connection_signature(conn, settings) != before
+    _, yt, pubs = m.build_publishers(conn, settings)
+    assert yt is not None and platforms.is_manual(pubs["youtube"])  # connected, still waiting for the switch
+    db.put(conn, "youtube_auto", "on")
+    _, _, pubs = m.build_publishers(conn, settings)
+    assert not platforms.is_manual(pubs["youtube"]) and db.get(conn, "auto_platforms") == "youtube"

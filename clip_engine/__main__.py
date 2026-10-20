@@ -15,6 +15,7 @@ import anthropic
 
 from . import dashboard, db, pipeline, platforms, strategy
 from .config import Settings
+from . import youtube
 from .youtube import YouTube
 
 TICK_MINUTES = 5
@@ -35,6 +36,22 @@ def due(conn, key: str, every_hours: float) -> bool:
 
 
 _producer: threading.Thread | None = None
+
+
+def connection_signature(conn, settings: Settings) -> tuple:
+    return (youtube.stored_token(conn, settings), youtube.auto_posting_on(conn))
+
+
+def build_publishers(conn, base_settings: Settings):
+    """(settings with the current YouTube token, YouTube client or None, publishers by platform)."""
+    settings = youtube.effective_settings(conn, base_settings)
+    yt = YouTube(settings) if settings.youtube_refresh_token else None
+    pubs = platforms.enabled(settings, conn, yt)
+    auto = [name for name, pub in pubs.items() if not platforms.is_manual(pub)]
+    db.put(conn, "auto_platforms", ",".join(auto))
+    log.info("posting automatically to: %s; from your phone: %s", ", ".join(auto) or "none",
+             ", ".join(n for n in pubs if n not in auto) or "none")
+    return settings, yt, pubs
 
 
 def start_producer(settings: Settings, claude, publishers: dict) -> threading.Thread:
@@ -98,12 +115,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     claude = anthropic.Anthropic()
-    yt = YouTube(settings) if settings.youtube_refresh_token else None
-    pubs = platforms.enabled(settings, conn, yt)
-    auto = [name for name, pub in pubs.items() if not platforms.is_manual(pub)]
-    db.put(conn, "auto_platforms", ",".join(auto))
-    log.info("posting automatically to: %s; from your phone: %s", ", ".join(auto) or "none",
-             ", ".join(n for n in pubs if n not in auto) or "none")
+    settings, yt, pubs = build_publishers(conn, settings)
     if command == "produce":
         pipeline.produce(conn, settings, claude, yt, pubs, CLIPS_PER_CYCLE)
     elif command == "publish":
@@ -112,7 +124,12 @@ def main(argv: list[str]) -> int:
         pipeline.score(conn, settings, pubs)
     elif command == "run":
         dashboard.start(settings)
+        signature = connection_signature(conn, settings)
         while True:
+            # Picks up Connect YouTube and the automatic-posting switch without a restart.
+            if connection_signature(conn, settings) != signature:
+                signature = connection_signature(conn, settings)
+                settings, yt, pubs = build_publishers(conn, settings)
             tick(conn, settings, claude, yt, pubs)
             time.sleep(TICK_MINUTES * 60)
     else:

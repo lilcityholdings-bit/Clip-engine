@@ -82,11 +82,14 @@ Rendered clips are served at `/media/<random token>.mp4` (Instagram fetches them
 
 Use company accounts for all of these so the business can be transferred to a buyer.
 
-**YouTube**
+**YouTube** (works from a phone browser; no computer or script)
 1. Create the channel as a **Brand Account** under the company Google account.
-2. In Google Cloud Console: enable **YouTube Data API v3** and **YouTube Analytics API**, set up the OAuth consent screen (External) and **publish** it, then create an OAuth client of type *Desktop app*.
-3. Run `python scripts/get_youtube_token.py` and put the three printed values into Railway.
-4. Apply for the **YouTube API audit** ("YouTube API Services - Audit and Quota Extension"). Until the project passes, API uploads are locked to private.
+2. In Google Cloud Console (console.cloud.google.com, same Google account): create a project, then **APIs & Services → Library** and enable **YouTube Data API v3** and **YouTube Analytics API**.
+3. **OAuth consent screen** (Google Auth Platform): choose **External**. For the app's links, use your dashboard address as the home page and `<dashboard address>/privacy` as the privacy policy. Add your Google account as a test user, then **publish the app to production**. While it's in Testing mode, the login token expires every 7 days.
+4. **Credentials → Create credentials → OAuth client ID → Web application.** Under *Authorized redirect URIs* add `<dashboard address>/oauth/youtube/callback` exactly.
+5. Copy the client ID and secret into Railway Variables as `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET`.
+6. On the dashboard, under Settings → **YouTube connection**, tap **Connect YouTube**, sign in as the channel's account and allow access. Google warns that the app is unverified (it's your own app); choose Advanced → continue.
+7. Apply for the audit with the **YouTube API Services - Audit and Quota Extension Form** (https://support.google.com/youtube/contact/yt_api_form). Until Google approves the project, API uploads can be kept private, so YouTube stays a phone-posted platform. When approved, tap **Google approved us: turn automatic posting on**.
 
 **TikTok**
 1. On developers.tiktok.com, create an app with the **Content Posting API** (Direct Post), and request the scopes `video.publish` and `video.list`.

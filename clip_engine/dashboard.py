@@ -6,12 +6,14 @@ POST /run              start a production cycle on the next tick
 POST /submitted        mark all pending campaign links as submitted
 POST /review/approve, /review/reject, /review/approve-all   decide on clips waiting for review
 POST /manual/save, /manual/skip   record (or skip) a clip you posted yourself from your phone
-POST /settings/review, /settings/ramp   switch review mode / gradual start on or off
+POST /settings/review, /settings/ramp, /settings/youtube-auto   switch review mode / gradual start on or off
 POST /campaigns/save   add or update a campaign from the form
 POST /campaigns/toggle pause or resume one campaign
 POST /campaigns/delete remove a campaign added from the dashboard
 GET  /media/<t>.mp4    rendered clip, served under an unguessable token
 GET  /health           liveness check for Railway
+GET  /privacy          public privacy policy (Google asks for one)
+GET  /connect/youtube  start Google sign-in; /oauth/youtube/callback finishes it
 """
 import base64
 import hmac
@@ -19,6 +21,7 @@ import html
 import json
 import logging
 import re
+import secrets
 import threading
 from dataclasses import asdict
 from datetime import date, datetime, timezone
@@ -26,7 +29,7 @@ from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from . import campaigns, db, pipeline, strategy
+from . import campaigns, db, pipeline, strategy, youtube
 from .config import Settings
 
 log = logging.getLogger(__name__)
@@ -45,6 +48,29 @@ def _arm_label(dimension: str, arm: str) -> str:
         fmt, secs = arm.split(":", 1)
         return f"{fmt} {secs}s"
     return arm.replace("_", " ")
+
+PRIVACY = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport"
+content="width=device-width, initial-scale=1"><title>Clip Engine privacy policy</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:640px;margin:24px auto;padding:0 16px}</style></head><body>
+<h1>Clip Engine privacy policy</h1>
+<p>Clip Engine is a private tool that its owner uses to publish short video clips to the owner's own YouTube channel.
+It is not offered to the public and has no other users.</p>
+<h2>What it accesses</h2>
+<p>With the owner's permission through Google sign-in, it can upload videos to the owner's YouTube channel and read
+that channel's video view and subscriber statistics. It uses these only to publish clips and to measure how they
+perform.</p>
+<h2>What it stores</h2>
+<p>It stores a Google login token on the owner's own server so it can keep working without signing in again, and
+the performance numbers it reads. It does not collect information about viewers.</p>
+<h2>Sharing</h2>
+<p>It does not sell, share or disclose this information to anyone.</p>
+<h2>Revoking access</h2>
+<p>Access can be removed at any time at <a href="https://myaccount.google.com/permissions">
+myaccount.google.com/permissions</a>.</p>
+<p>Clip Engine's use of information received from Google APIs adheres to the
+<a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>,
+including the Limited Use requirements.</p>
+</body></html>"""
 
 PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Clip Engine</title>
@@ -297,6 +323,29 @@ def _ready(conn, settings: Settings) -> str:
             f'{"".join(cards)}{COPY_JS}</section>')
 
 
+def _youtube_card(conn, settings: Settings) -> str:
+    e = html.escape
+    connected = bool(youtube.stored_token(conn, settings))
+    auto = youtube.auto_posting_on(conn)
+    if not (settings.youtube_client_id and settings.youtube_client_secret):
+        body = ('<div class="muted">To connect: in Railway Variables add <code>YOUTUBE_CLIENT_ID</code> and '
+                '<code>YOUTUBE_CLIENT_SECRET</code> from Google Cloud, with this redirect address: '
+                f'<code>{e(youtube.redirect_uri(settings))}</code></div>')
+        status = '<span class="muted">not set up</span>'
+    elif not connected:
+        status = '<span class="bad">not connected</span>'
+        body = '<div class="row" style="margin-top:8px"><a class="button" href="/connect/youtube">Connect YouTube</a></div>'
+    else:
+        status = '<span class="good">connected</span>'
+        body = (f'<div class="muted">Automatic posting: {"on" if auto else "off"}. Google keeps videos uploaded by '
+                f'a new project private until it approves the project, so leave this off until then and post '
+                f'YouTube from your phone.</div>'
+                f'<div class="row" style="margin-top:8px"><form class="inline" method="post" '
+                f'action="/settings/youtube-auto"><button>{"Turn automatic posting off" if auto else "Google approved us: turn automatic posting on"}</button></form>'
+                f'<a class="button" href="/connect/youtube">Reconnect</a></div>')
+    return f'<div class="card"><b>YouTube connection:</b> {status}{body}</div>'
+
+
 def _settings(conn, settings: Settings) -> str:
     auto = pipeline.auto_platforms(conn)
     modes = ", ".join(f"{name}: {'automatic' if key in auto else 'from your phone'}"
@@ -305,6 +354,7 @@ def _settings(conn, settings: Settings) -> str:
     ramp_on = db.get(conn, "ramp", "on") == "on"
     limit = pipeline.daily_clip_limit(conn, settings)
     return (
+        _youtube_card(conn, settings) +
         f'<div class="card"><b>Posting:</b> {html.escape(modes)}<div class="muted">A platform switches to '
         f'automatic when its posting connection is added in Railway.</div></div>'
         f'<div class="card"><b>Review clips before posting:</b> '
@@ -421,6 +471,10 @@ def make_handler(settings: Settings):
             if self.path == "/health":
                 return self._send(200, b"ok", "text/plain")
             url = urlsplit(self.path)
+            if url.path == "/privacy":
+                return self._send(200, PRIVACY.encode())
+            if url.path in ("/connect/youtube", "/oauth/youtube/callback"):
+                return self._youtube_oauth(url)
             match = MEDIA_RE.match(url.path)
             if match:
                 path = media_dir / f"{match.group(1)}.mp4"
@@ -432,7 +486,38 @@ def make_handler(settings: Settings):
             if not self._authorized():
                 return self._deny()
             query = {k: v[0] for k, v in parse_qs(url.query).items()}
-            self._page(notice=query.get("notice", ""), edit_id=query.get("edit", ""))
+            self._page(notice=query.get("notice", ""), error=query.get("error", ""), edit_id=query.get("edit", ""))
+
+        def _youtube_oauth(self, url) -> None:
+            """Sign in with Google from the dashboard, so no computer or script is needed."""
+            if not self._authorized():
+                return self._deny()
+            if not (settings.youtube_client_id and settings.youtube_client_secret and settings.public_base_url):
+                return self._redirect("/?" + urlencode({"error": "Add YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET and "
+                                                                   "PUBLIC_BASE_URL in Railway first."}))
+            conn = db.connect(settings.db_path)
+            try:
+                if url.path == "/connect/youtube":
+                    state = secrets.token_urlsafe(24)
+                    db.put(conn, "youtube_oauth_state", state)
+                    return self._redirect(youtube.authorize_url(settings, state), code=302)
+                query = {k: v[0] for k, v in parse_qs(url.query).items()}
+                expected = db.get(conn, "youtube_oauth_state", "")
+                db.put(conn, "youtube_oauth_state", "")  # one use only
+                if not expected or not hmac.compare_digest(query.get("state", ""), expected):
+                    return self._redirect("/?" + urlencode({"error": "That sign-in link expired. Tap Connect YouTube again."}))
+                if "code" not in query:
+                    return self._redirect("/?" + urlencode({"error": f"Google didn't connect the account "
+                                                                     f"({query.get('error', 'cancelled')})."}))
+                try:
+                    token = youtube.exchange_code(settings, query["code"])
+                except Exception as exc:
+                    return self._redirect("/?" + urlencode({"error": f"Google sign-in failed: {exc}"}))
+                db.put(conn, "youtube_refresh_token", token)
+                return self._redirect("/?" + urlencode({"notice": "YouTube connected. Clips still post from your phone "
+                                                                  "until you turn automatic posting on."}))
+            finally:
+                conn.close()
 
         def _send_video(self, path, download: bool = False) -> None:
             """Serve a clip, honouring byte ranges (iPhones won't play video without them)."""
@@ -483,8 +568,8 @@ def make_handler(settings: Settings):
             length = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
             return parse_qs(self.rfile.read(length).decode("utf-8", "replace"), keep_blank_values=True)
 
-        def _redirect(self, location: str) -> None:
-            self.send_response(303)
+        def _redirect(self, location: str, code: int = 303) -> None:
+            self.send_response(code)
             self.send_header("Location", location)
             self.end_headers()
 
@@ -523,6 +608,8 @@ def make_handler(settings: Settings):
                         pipeline.approve(conn, c["id"])
                 elif self.path == "/settings/review":
                     db.put(conn, "review_mode", "off" if pipeline.review_mode(conn) else "on")
+                elif self.path == "/settings/youtube-auto":
+                    db.put(conn, "youtube_auto", "off" if youtube.auto_posting_on(conn) else "on")
                 elif self.path == "/settings/ramp":
                     db.put(conn, "ramp", "off" if db.get(conn, "ramp", "on") == "on" else "on")
                 else:

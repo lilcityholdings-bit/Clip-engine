@@ -317,7 +317,9 @@ def is_manual(publisher) -> bool:
 def enabled(settings: Settings, conn: sqlite3.Connection, yt) -> dict:
     """Publishers whose credentials are configured, by name."""
     pubs = {}
-    if settings.youtube_refresh_token and yt is not None:
+    # YouTube posts automatically only once connected and switched on (after Google's approval).
+    if settings.youtube_refresh_token and yt is not None and (
+            db.get(conn, "youtube_auto") == "on" or os.environ.get("YOUTUBE_AUTO") == "1"):
         pubs["youtube"] = YouTubePublisher(yt, settings.max_uploads_per_day)
     if os.environ.get("TIKTOK_CLIENT_KEY") and os.environ.get("TIKTOK_REFRESH_TOKEN"):
         pubs["tiktok"] = TikTokPublisher(
