@@ -32,12 +32,16 @@ class PublishError(RuntimeError):
 class YouTubePublisher:
     name = "youtube"
 
-    def __init__(self, yt, daily_limit: int):
+    def __init__(self, yt, daily_limit: int, on_private=None):
         self.yt = yt
         self.daily_limit = daily_limit
+        self.on_private = on_private  # called when Google keeps an upload private
 
     def publish(self, clip: dict, path: Path, public_url: str) -> tuple[str, str]:
         video_id = self.yt.upload(path, clip["title"], clip["description"], json.loads(clip["tags"]))
+        wanted = getattr(self.yt.settings, "privacy_status", "public")
+        if self.on_private and wanted != "private" and self.yt.last_privacy == "private":
+            self.on_private(video_id)
         return video_id, f"https://youtu.be/{video_id}"
 
     def stats(self, ids: list[str]) -> dict[str, tuple[int, int]]:
@@ -320,7 +324,13 @@ def enabled(settings: Settings, conn: sqlite3.Connection, yt) -> dict:
     # YouTube posts automatically only once connected and switched on (after Google's approval).
     if settings.youtube_refresh_token and yt is not None and (
             db.get(conn, "youtube_auto") == "on" or os.environ.get("YOUTUBE_AUTO") == "1"):
-        pubs["youtube"] = YouTubePublisher(yt, settings.max_uploads_per_day)
+        def on_private(video_id: str) -> None:
+            """Google kept an upload private: stop automatic YouTube posting and tell the owner."""
+            db.put(conn, "youtube_auto", "off")
+            db.put(conn, "youtube_private_lock", video_id)
+            log.warning("Google kept YouTube upload %s private; automatic YouTube posting switched off", video_id)
+
+        pubs["youtube"] = YouTubePublisher(yt, settings.max_uploads_per_day, on_private)
     if os.environ.get("TIKTOK_CLIENT_KEY") and os.environ.get("TIKTOK_REFRESH_TOKEN"):
         pubs["tiktok"] = TikTokPublisher(
             conn, os.environ["TIKTOK_CLIENT_KEY"], os.environ.get("TIKTOK_CLIENT_SECRET", ""),

@@ -6,7 +6,7 @@ POST /run              start a production cycle on the next tick
 POST /submitted        mark all pending campaign links as submitted
 POST /review/approve, /review/reject, /review/approve-all   decide on clips waiting for review
 POST /manual/save, /manual/skip   record (or skip) a clip you posted yourself from your phone
-POST /settings/review, /settings/ramp, /settings/youtube-auto   switch review mode / gradual start on or off
+POST /settings/review, /settings/ramp, /settings/youtube-auto, /settings/youtube-test   switch review mode / gradual start on or off
 POST /campaigns/save   add or update a campaign from the form
 POST /campaigns/toggle pause or resume one campaign
 POST /campaigns/delete remove a campaign added from the dashboard
@@ -337,12 +337,21 @@ def _youtube_card(conn, settings: Settings) -> str:
         body = '<div class="row" style="margin-top:8px"><a class="button" href="/connect/youtube">Connect YouTube</a></div>'
     else:
         status = '<span class="good">connected</span>'
-        body = (f'<div class="muted">Automatic posting: {"on" if auto else "off"}. Google keeps videos uploaded by '
-                f'a new project private until it approves the project, so leave this off until then and post '
-                f'YouTube from your phone.</div>'
+        lock = db.get(conn, "youtube_private_lock")
+        lock_html = (f'<div class="error" style="padding:8px;border:1px solid;border-radius:8px;margin:8px 0">Google '
+                     f'kept an automatic upload private (video {e(lock)}), so automatic YouTube posting was switched '
+                     f'off. Post YouTube from your phone and request Google\'s audit.</div>' if lock else "")
+        result = db.get(conn, "youtube_test_result")
+        result_html = f'<div class="muted">Last test: {e(result)}</div>' if result else ""
+        body = (f'{lock_html}<div class="muted">Automatic posting: {"on" if auto else "off"}. Google may keep videos '
+                f'uploaded by a new project private. Run the test below first; if it says uploads stay public, turn '
+                f'automatic posting on. Otherwise post YouTube from your phone.</div>{result_html}'
                 f'<div class="row" style="margin-top:8px"><form class="inline" method="post" '
-                f'action="/settings/youtube-auto"><button>{"Turn automatic posting off" if auto else "Google approved us: turn automatic posting on"}</button></form>'
-                f'<a class="button" href="/connect/youtube">Reconnect</a></div>')
+                f'action="/settings/youtube-auto"><button>{"Turn automatic posting off" if auto else "Turn automatic posting on"}</button></form>'
+                f'<form class="inline" method="post" action="/settings/youtube-test"><button>Test a YouTube upload</button></form>'
+                f'<a class="button" href="/connect/youtube">Reconnect</a></div>'
+                f'<div class="muted" style="margin-top:6px">The test uploads a 3-second unlisted video. Delete it in '
+                f'YouTube Studio afterwards.</div>')
     return f'<div class="card"><b>YouTube connection:</b> {status}{body}</div>'
 
 
@@ -488,6 +497,28 @@ def make_handler(settings: Settings):
             query = {k: v[0] for k, v in parse_qs(url.query).items()}
             self._page(notice=query.get("notice", ""), error=query.get("error", ""), edit_id=query.get("edit", ""))
 
+        def _youtube_test(self, conn) -> None:
+            """Upload a tiny unlisted video and report whether Google kept it private."""
+            token = youtube.stored_token(conn, settings)
+            if not token:
+                return self._redirect("/?" + urlencode({"error": "Connect YouTube first."}))
+            try:
+                result = youtube.YouTube(youtube.effective_settings(conn, settings)).test_upload(
+                    settings.work_dir / "yt-test")
+            except Exception as exc:
+                db.put(conn, "youtube_test_result", f"failed: {exc}")
+                return self._redirect("/?" + urlencode({"error": f"The test upload failed: {exc}"}))
+            if result["locked"]:
+                msg = ("Google kept the test video private, so API uploads stay private until Google approves the "
+                       "project. Post YouTube from your phone and request the audit.")
+                db.put(conn, "youtube_test_result", "uploads are kept private (audit needed)")
+                return self._redirect("/?" + urlencode({"error": msg}))
+            db.put(conn, "youtube_test_result", f"uploads are not locked (status: {result['applied']})")
+            return self._redirect("/?" + urlencode({"notice": f"Test passed: the video was uploaded as "
+                                                              f"{result['applied']}, not forced private. You can turn "
+                                                              f"automatic YouTube posting on. Delete the test video in "
+                                                              f"YouTube Studio."}))
+
         def _youtube_oauth(self, url) -> None:
             """Sign in with Google from the dashboard, so no computer or script is needed."""
             if not self._authorized():
@@ -609,7 +640,12 @@ def make_handler(settings: Settings):
                 elif self.path == "/settings/review":
                     db.put(conn, "review_mode", "off" if pipeline.review_mode(conn) else "on")
                 elif self.path == "/settings/youtube-auto":
-                    db.put(conn, "youtube_auto", "off" if youtube.auto_posting_on(conn) else "on")
+                    turning_on = not youtube.auto_posting_on(conn)
+                    db.put(conn, "youtube_auto", "on" if turning_on else "off")
+                    if turning_on:
+                        db.put(conn, "youtube_private_lock", "")
+                elif self.path == "/settings/youtube-test":
+                    return self._youtube_test(conn)
                 elif self.path == "/settings/ramp":
                     db.put(conn, "ramp", "off" if db.get(conn, "ramp", "on") == "on" else "on")
                 else:

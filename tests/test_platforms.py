@@ -587,7 +587,7 @@ def test_youtube_card_guides_setup_and_toggle(yt_server, tmp_path):
     assert "Connect YouTube</a>" in _get(base + "/", "s3cret").read().decode()
     db.put(conn, "youtube_refresh_token", "R")
     page = _get(base + "/", "s3cret").read().decode()
-    assert "Automatic posting: off" in page and "Google approved us" in page
+    assert "Automatic posting: off" in page and "Turn automatic posting on" in page and "Test a YouTube upload" in page
     _get(base + "/settings/youtube-auto", "s3cret", data=b"")
     assert youtube.auto_posting_on(db.connect(tmp_path / "clip_engine.db"))
 
@@ -619,3 +619,86 @@ def test_main_rebuilds_publishers_after_connect(tmp_path, monkeypatch):
     db.put(conn, "youtube_auto", "on")
     _, _, pubs = m.build_publishers(conn, settings)
     assert not platforms.is_manual(pubs["youtube"]) and db.get(conn, "auto_platforms") == "youtube"
+
+
+# --- YouTube upload test and private-lock detection --------------------------
+
+class _Req:
+    def __init__(self, response):
+        self.response = response
+
+    def next_chunk(self):
+        return None, self.response
+
+
+def _yt_with_response(tmp_path, response):
+    yt = youtube.YouTube.__new__(youtube.YouTube)
+    yt.settings = Settings(data_dir=tmp_path, youtube_refresh_token="R", privacy_status="public")
+    inserts = []
+    yt.api = MagicMock()
+    yt.api.videos.return_value.insert.side_effect = lambda **kw: inserts.append(kw) or _Req(response)
+    return yt, inserts
+
+
+def test_upload_records_the_privacy_google_applied(tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    yt, inserts = _yt_with_response(tmp_path, {"id": "abc", "status": {"privacyStatus": "private"}})
+    assert yt.upload(video, "t", "d", []) == "abc"
+    assert yt.last_privacy == "private" and inserts[0]["body"]["status"]["privacyStatus"] == "public"
+    assert yt.upload(video, "t", "d", [], privacy="unlisted") == "abc"
+    assert inserts[1]["body"]["status"]["privacyStatus"] == "unlisted"
+
+
+def test_test_upload_reports_lock_or_success(tmp_path, monkeypatch):
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: (tmp_path / "w" / "connection-test.mp4").write_bytes(b"v"))
+    for applied, locked in (("private", True), ("unlisted", False)):
+        yt, _ = _yt_with_response(tmp_path, {"id": "vid1", "status": {"privacyStatus": applied}})
+        result = yt.test_upload(tmp_path / "w")
+        assert result == {"video_id": "vid1", "requested": "unlisted", "applied": applied, "locked": locked}
+        assert not (tmp_path / "w" / "connection-test.mp4").exists()
+
+
+def test_publisher_switches_off_when_google_keeps_upload_private(tmp_path):
+    conn = db.connect(":memory:")
+    db.put(conn, "youtube_auto", "on")
+    yt, _ = _yt_with_response(tmp_path, {"id": "abc", "status": {"privacyStatus": "private"}})
+    clip = {"title": "T", "description": "D", "tags": "[]"}
+    pubs = platforms.enabled(yt.settings, conn, yt)
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    assert pubs["youtube"].publish(clip, video, "") == ("abc", "https://youtu.be/abc")
+    assert db.get(conn, "youtube_auto") == "off" and db.get(conn, "youtube_private_lock") == "abc"
+    # public stays public: nothing changes
+    db.put(conn, "youtube_auto", "on")
+    db.put(conn, "youtube_private_lock", "")
+    yt2, _ = _yt_with_response(tmp_path, {"id": "def", "status": {"privacyStatus": "public"}})
+    platforms.enabled(yt2.settings, conn, yt2)["youtube"].publish(clip, video, "")
+    assert db.get(conn, "youtube_auto") == "on"
+
+
+def test_dashboard_test_button(yt_server, monkeypatch):
+    base, conn, _ = yt_server
+    _, location = _raw(base + "/", password="s3cret")
+    page = _get(base + "/settings/youtube-test", "s3cret", data=b"").read().decode()
+    assert "Connect YouTube first" in page
+
+    db.put(conn, "youtube_refresh_token", "R")
+    results = iter([{"video_id": "v", "requested": "unlisted", "applied": "unlisted", "locked": False},
+                    {"video_id": "v", "requested": "unlisted", "applied": "private", "locked": True}])
+
+    class FakeYT:
+        def __init__(self, settings):
+            pass
+
+        def test_upload(self, workdir):
+            return next(results)
+    monkeypatch.setattr(youtube, "YouTube", FakeYT)
+    ok = _get(base + "/settings/youtube-test", "s3cret", data=b"").read().decode()
+    assert "Test passed" in ok and "not locked" in _get(base + "/", "s3cret").read().decode()
+    bad = _get(base + "/settings/youtube-test", "s3cret", data=b"").read().decode()
+    assert "kept the test video private" in bad
+    assert "audit needed" in _get(base + "/", "s3cret").read().decode()
+    db.put(conn, "youtube_private_lock", "vid9")
+    assert "Google kept an automatic upload private" in _get(base + "/", "s3cret").read().decode()

@@ -89,7 +89,7 @@ Use company accounts for all of these so the business can be transferred to a bu
 4. **Credentials → Create credentials → OAuth client ID → Web application.** Under *Authorized redirect URIs* add `<dashboard address>/oauth/youtube/callback` exactly.
 5. Copy the client ID and secret into Railway Variables as `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET`.
 6. On the dashboard, under Settings → **YouTube connection**, tap **Connect YouTube**, sign in as the channel's account and allow access. Google warns that the app is unverified (it's your own app); choose Advanced → continue.
-7. Apply for the audit with the **YouTube API Services - Audit and Quota Extension Form** (https://support.google.com/youtube/contact/yt_api_form). Until Google approves the project, API uploads can be kept private, so YouTube stays a phone-posted platform. When approved, tap **Google approved us: turn automatic posting on**.
+7. Tap **Test a YouTube upload** on the dashboard. It uploads a 3-second unlisted video and reports whether Google forced it private. Delete the test video in YouTube Studio afterwards. Google's current documentation says uploads from unverified projects are not restricted to private, so you may not need an audit. If the test says uploads are kept private, apply with the **YouTube API Services - Audit and Quota Extension Form** (https://support.google.com/youtube/contact/yt_api_form). If it passes, tap **Turn automatic posting on**. If Google ever keeps an automatic upload private, the engine switches YouTube back to phone posting and shows a warning.
 
 **TikTok**
 1. On developers.tiktok.com, create an app with the **Content Posting API** (Direct Post), and request the scopes `video.publish` and `video.list`.

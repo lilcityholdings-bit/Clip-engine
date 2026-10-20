@@ -87,7 +87,10 @@ class YouTube:
         ).execute()
         return [item["snippet"]["title"] for item in resp.get("items", [])]
 
-    def upload(self, path: Path, title: str, description: str, tags: list[str]) -> str:
+    last_privacy: str | None = None  # privacy YouTube actually applied to the latest upload
+
+    def upload(self, path: Path, title: str, description: str, tags: list[str], privacy: str | None = None) -> str:
+        requested = privacy or self.settings.privacy_status
         body = {
             "snippet": {
                 "title": title[:100],
@@ -96,7 +99,7 @@ class YouTube:
                 "categoryId": CATEGORY_EDUCATION,
             },
             "status": {
-                "privacyStatus": self.settings.privacy_status,
+                "privacyStatus": requested,
                 "selfDeclaredMadeForKids": False,
             },
         }
@@ -105,7 +108,29 @@ class YouTube:
         response = None
         while response is None:
             _, response = request.next_chunk()
+        self.last_privacy = (response.get("status") or {}).get("privacyStatus")
         return response["id"]
+
+    def test_upload(self, workdir: Path) -> dict:
+        """Upload a 3-second unlisted video to see whether Google keeps API uploads private.
+
+        Returns {"video_id", "requested", "applied", "locked"}. The video is harmless and can be
+        deleted in YouTube Studio; the API permission we ask for can't delete videos.
+        """
+        import subprocess
+
+        workdir.mkdir(parents=True, exist_ok=True)
+        path = workdir / "connection-test.mp4"
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=0x223344:s=720x1280:r=15:d=3",
+                        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "3", "-shortest", "-c:v", "libx264",
+                        "-pix_fmt", "yuv420p", "-c:a", "aac", str(path)], check=True, capture_output=True)
+        try:
+            video_id = self.upload(path, "Clip Engine connection test (safe to delete)",
+                                   "Automatic connection test. You can delete this video.", [], privacy="unlisted")
+        finally:
+            path.unlink(missing_ok=True)
+        applied = self.last_privacy
+        return {"video_id": video_id, "requested": "unlisted", "applied": applied, "locked": applied == "private"}
 
     def performance(self, video_ids: list[str], since: date) -> dict[str, tuple[int, int]]:
         """views and subscribersGained per video since a date."""
