@@ -17,6 +17,23 @@ A platform switches to automatic posting as soon as its connection (Ayrshare or 
 
 That's it. The direct YouTube, TikTok and Instagram connections described further down are optional. They save Ayrshare's fee, but each needs a developer app and a platform review.
 
+## Getting started checklist
+
+Until setup is finished, the top of the dashboard shows a checklist (Claude key, Connect YouTube, test upload, automatic posting, first campaign, first approved clip). It names the next step and puts its button right there, so you never have to hunt through Settings.
+
+## Platform rules the engine follows
+
+Checked October 2026; the details are in `clip_engine/policy.py`.
+
+- **Original angle:** every caption opens with the channel's own take (why the moment matters, context, or a question), not just a summary. YouTube, Instagram and TikTok all demote plain reposts.
+- **No look-alike uploads:** Claude sees the last 30 days of titles, and any new clip whose title nearly repeats one is dropped. Near-identical uploads count as mass-produced content on YouTube.
+- **Hashtags:** at most 5 (Instagram's cap since December 2025), all specific to the clip. Generic tags such as #fyp, #viral, #reels and #explore are removed.
+- **No watermarks:** campaign sources from TikTok, Instagram or Facebook are refused. Their videos carry the app's logo, which TikTok and Instagram treat as unoriginal.
+- **Disclosure:** campaign clips carry #ad and TikTok's branded-content setting. YouTube uploads state that the video contains no AI-generated or altered footage.
+- **Pace:** review mode, the gradual start and daily caps keep new accounts from looking like spam.
+
+What the engine can't do for you: Instagram leaves accounts that **mostly** repost others' work out of recommendations, so post some original content of your own on each account as well. On YouTube, tick **Includes paid promotion** in YouTube Studio for campaign clips if the campaign asks for it; the API doesn't reliably set it.
+
 ## How it works
 
 Every 5 minutes the scheduler checks what needs doing:

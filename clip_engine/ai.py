@@ -93,6 +93,7 @@ def pick_clips(
     rules: str = "",
     track_record: str = "",
     trends: str = "",
+    recent_titles: list[str] | None = None,
 ) -> list[dict]:
     """Choose the most watchable self-contained moments and write metadata for them.
 
@@ -139,7 +140,10 @@ def pick_clips(
         "'skipped part of the video' line.\n\n"
         f"Title style: {TITLE_STYLE_GUIDE[title_style]} Keep titles under 70 characters, "
         "accurate to what's said, with no ALL CAPS words or emoji spam. "
-        "Description: 1-2 sentences about the clip (attribution is added separately). "
+        "Description: 1-2 sentences in the channel's own voice that add something: why this "
+        "moment matters, the context a stranger needs, or a question for viewers. Not just a "
+        "summary of what's said (platforms reward an original angle; attribution is added "
+        "separately). "
         "Tags: 5-10 search terms. "
         "hook_text: 2-6 words shown on screen for the first 3 seconds to stop the scroll "
         "(a tease of the payoff, not the title repeated). "
@@ -157,8 +161,15 @@ def pick_clips(
         )
     prompt += (
         "\n\nhashtags: 3-5 hashtags for the caption, mixing 1-2 trending ones that genuinely "
-        "fit with specific ones for the topic (include the # sign)."
+        "fit with specific ones for the topic (include the # sign). Every hashtag must be "
+        "about this clip; never use generic ones like #fyp, #viral, #reels or #explore."
     )
+    if recent_titles:
+        prompt += (
+            "\n\nTitles this channel already used recently. Don't repeat their wording or "
+            "structure; near-identical uploads are treated as mass-produced spam:\n"
+            + "\n".join(f"- {t}" for t in recent_titles[:40])
+        )
     if track_record:
         prompt += (
             "\n\nHow this channel's past clips actually performed (learn from the winners' "

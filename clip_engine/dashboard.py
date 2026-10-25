@@ -21,6 +21,7 @@ import hmac
 import html
 import json
 import logging
+import os
 import re
 import secrets
 import threading
@@ -103,6 +104,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 </style></head><body><main>
 <h1>Clip Engine <span class="{state_class}">&middot; {state}</span></h1>
 {banner}
+{start}
 {review}
 {ready}
 <section><div class="row">
@@ -121,7 +123,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 <section><h2>What's working (higher score = more views and earnings)</h2>{strategy}</section>
 <section><h2>Recent clips</h2>{clips}</section>
 <section><h2>Recent problems</h2>{errors}</section>
-<section><h2>Settings</h2>{settings_html}</section>
+<section id="settings"><h2>Settings</h2>{settings_html}</section>
 </main></body></html>"""
 
 
@@ -361,6 +363,48 @@ def _youtube_card(conn, settings: Settings) -> str:
     return f'<div class="card"><b>YouTube connection:</b> {status}{body}</div>'
 
 
+def setup_steps(conn, settings: Settings) -> list[tuple[str, bool, str]]:
+    """(step, done, how to do it) for everything needed before clips go out."""
+    connected = bool(youtube.stored_token(conn, settings))
+    tested = (db.get(conn, "youtube_test_result") or "").startswith("uploads are not locked")
+    auto = youtube.auto_posting_on(conn)
+    decided = conn.execute("SELECT 1 FROM posts WHERE status != 'review' LIMIT 1").fetchone() is not None
+    return [
+        ("Add your Claude API key", bool(os.environ.get("ANTHROPIC_API_KEY")),
+         "Create a key at console.anthropic.com (API Keys) and set a monthly spending limit. In Railway, open "
+         "clip-engine, Variables, and add it as ANTHROPIC_API_KEY."),
+        ("Connect YouTube", connected, '<a class="button" href="/connect/youtube">Connect YouTube</a>'),
+        ("Test a YouTube upload", tested or auto,
+         '<form class="inline" method="post" action="/settings/youtube-test"><button>Test a YouTube upload</button></form>'),
+        ("Turn on automatic YouTube posting", auto,
+         '<form class="inline" method="post" action="/settings/youtube-auto"><button>Turn it on</button></form>'),
+        ("Add a campaign", bool(campaigns.load(settings.data_dir)),
+         'Join a clipping campaign (for example on Whop), then fill in <a href="#campaigns">Add a campaign</a>.'),
+        ("Approve your first clip", decided,
+         '<form class="inline" method="post" action="/run"><button>Make clips now</button></form> '
+         "then approve the best ones under Waiting for your approval. The first clips take about 15 minutes."),
+    ]
+
+
+def _getting_started(conn, settings: Settings) -> str:
+    steps = setup_steps(conn, settings)
+    done = sum(1 for _, ok, _ in steps if ok)
+    if done == len(steps):
+        return ""
+    items, shown_next = [], False
+    for name, ok, how in steps:
+        if ok:
+            items.append(f'<li class="good">&#10003; {html.escape(name)}</li>')
+        elif not shown_next:
+            shown_next = True
+            # how is trusted markup written above, never user input
+            items.append(f'<li><b>Next: {html.escape(name)}</b><div style="margin:6px 0">{how}</div></li>')
+        else:
+            items.append(f'<li class="muted">{html.escape(name)}</li>')
+    return (f'<section id="start"><h2>Getting started: {done} of {len(steps)} done</h2>'
+            f'<ol style="margin:0;padding-left:20px">{"".join(items)}</ol></section>')
+
+
 def _settings(conn, settings: Settings) -> str:
     auto = pipeline.auto_platforms(conn)
     modes = ", ".join(f"{name}: {'automatic' if key in auto else 'from your phone'}"
@@ -425,6 +469,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
         banner = f'<section class="error">{e(error)}</section>'
     return PAGE.format(
         banner=banner,
+        start=_getting_started(conn, settings),
         review=_review(conn, settings),
         ready=_ready(conn, settings),
         settings_html=_settings(conn, settings),

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import anthropic
 
-from . import ai, campaigns, db, media, moments, sources, strategy, trends
+from . import ai, campaigns, db, media, moments, policy, sources, strategy, trends
 from .config import Settings
 from .db import clips_today, posts_today
 from .platforms import PublishError, is_manual, next_slot
@@ -109,6 +109,9 @@ def find_campaign_source(conn: sqlite3.Connection, campaign: campaigns.Campaign)
         for url in videos:
             if not url or _seen(conn, url):
                 continue
+            if policy.watermarked(url):
+                log.info("skipping %s: videos from that app carry a watermark", url)
+                continue
             try:
                 src = campaigns.describe(campaign, url)
             except Exception:
@@ -163,8 +166,7 @@ def niche_of(campaign: campaigns.Campaign | None, arms: dict) -> str:
 
 def compose_description(clip: dict, footer: str) -> str:
     """Clip description, then its hashtags, then credit and disclosure."""
-    tags = " ".join(t if t.startswith("#") else f"#{t}" for t in clip.get("hashtags", [])[:5]
-                    if t.strip("# ") and " " not in t.strip())
+    tags = " ".join(policy.clean_hashtags(clip.get("hashtags", [])))
     return "\n\n".join(part for part in (clip["description"], tags, footer) if part)
 
 
@@ -321,17 +323,24 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             log.warning("no speech found in %s", src.identifier)
             return 0
         lo, hi = strategy.length_range(arms)
+        recent = policy.recent_titles(conn)
         clips = ai.pick_clips(
             claude, segments, source_title=src.title, fmt=arms["format"],
             min_sec=lo, max_sec=hi, title_style=arms["title_style"], count=remaining,
             rules=campaign.rules if campaign else "",
             track_record=track_record(conn),
+            recent_titles=recent,
             trends=trends.as_prompt(trends.brief(conn, claude, niche_of(campaign, arms), settings.trend_region)),
         )
         for i, clip in enumerate(clips):
             if not moments.same_window(clip, segments):
                 log.info("skipping clip that crosses a transcript gap: %s", clip["title"])
                 continue
+            twin = policy.near_duplicate(clip["title"], recent)
+            if twin:
+                log.info("skipping clip that looks like a repeat of %r: %s", twin, clip["title"])
+                continue
+            recent.append(clip["title"])
             clip = snap_to_words(clip, words)
             if arms["format"] == "short":
                 clip["end"] = min(clip["end"], clip["start"] + 59)

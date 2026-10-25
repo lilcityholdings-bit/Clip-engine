@@ -109,6 +109,8 @@ class YouTube:
             "status": {
                 "privacyStatus": requested,
                 "selfDeclaredMadeForKids": False,
+                # Real footage with captions; nothing is AI-generated or altered to look real.
+                "containsSyntheticMedia": False,
             },
         }
         media = MediaFileUpload(str(path), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True)

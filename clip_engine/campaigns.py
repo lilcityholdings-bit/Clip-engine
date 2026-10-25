@@ -34,6 +34,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 
+from .policy import watermarked
 from .sources import Source
 
 log = logging.getLogger(__name__)
@@ -134,6 +135,11 @@ def from_form(form: dict[str, str], platforms: list[str]) -> Campaign:
     bad = [s for s in sources if not s.startswith(("http://", "https://"))]
     if not sources or bad:
         raise CampaignError("Add at least one link to the creator's channel, playlist or videos (each starting with https://).")
+    marked = [s for s in sources if watermarked(s)]
+    if marked:
+        raise CampaignError("TikTok, Instagram and Facebook videos carry the app's watermark, which TikTok and Instagram "
+                            "treat as unoriginal. Use the creator's YouTube channel or the campaign's original files: "
+                            + ", ".join(marked))
     chosen = [p for p in platforms if p in PLATFORMS]
     if not chosen:
         raise CampaignError("Pick at least one platform the campaign pays for.")
