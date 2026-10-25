@@ -1,12 +1,13 @@
 """Small web dashboard (password protected) plus public clip hosting for Instagram.
 
-GET  /                 dashboard (HTTP basic auth, any username + DASHBOARD_PASSWORD)
+GET  /                 dashboard (HTTP basic auth, any username + DASHBOARD_PASSWORD; 5 wrong passwords lock an address out for 15 minutes)
 POST /pause, /resume   stop or restart posting and production
 POST /run              start a production cycle on the next tick
 POST /submitted        mark all pending campaign links as submitted
 POST /review/approve, /review/reject, /review/approve-all   decide on clips waiting for review
 POST /manual/save, /manual/skip   record (or skip) a clip you posted yourself from your phone
 POST /settings/review, /settings/ramp, /settings/youtube-auto, /settings/youtube-test   switch review mode / gradual start on or off
+POST /settings/youtube-disconnect   cancel the saved YouTube login at Google and forget it
 POST /campaigns/save   add or update a campaign from the form
 POST /campaigns/toggle pause or resume one campaign
 POST /campaigns/delete remove a campaign added from the dashboard
@@ -23,6 +24,7 @@ import logging
 import re
 import secrets
 import threading
+import time
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
@@ -349,9 +351,13 @@ def _youtube_card(conn, settings: Settings) -> str:
                 f'<div class="row" style="margin-top:8px"><form class="inline" method="post" '
                 f'action="/settings/youtube-auto"><button>{"Turn automatic posting off" if auto else "Turn automatic posting on"}</button></form>'
                 f'<form class="inline" method="post" action="/settings/youtube-test"><button>Test a YouTube upload</button></form>'
-                f'<a class="button" href="/connect/youtube">Reconnect</a></div>'
+                f'<a class="button" href="/connect/youtube">Reconnect</a>'
+                f'<form class="inline" method="post" action="/settings/youtube-disconnect" '
+                f'onsubmit="return confirm(\'Cancel the YouTube login? Posting stops until you reconnect.\')">'
+                f'<button>Disconnect and cancel login</button></form></div>'
                 f'<div class="muted" style="margin-top:6px">The test uploads a 3-second unlisted video. Delete it in '
-                f'YouTube Studio afterwards.</div>')
+                f'YouTube Studio afterwards. Disconnect cancels the saved login at Google; use it if you think '
+                f'someone else got hold of it.</div>')
     return f'<div class="card"><b>YouTube connection:</b> {status}{body}</div>'
 
 
@@ -445,15 +451,55 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
     )
 
 
-def make_handler(settings: Settings):
+MAX_BAD_PASSWORDS = 5
+LOCKOUT_SECONDS = 15 * 60
+
+
+class LoginThrottle:
+    """Locks an address out for 15 minutes after 5 wrong passwords, so the password can't be guessed."""
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._failures: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def _recent(self, client: str) -> list[float]:
+        cutoff = self._clock() - LOCKOUT_SECONDS
+        return [t for t in self._failures.get(client, []) if t > cutoff]
+
+    def blocked(self, client: str) -> bool:
+        with self._lock:
+            return len(self._recent(client)) >= MAX_BAD_PASSWORDS
+
+    def fail(self, client: str) -> None:
+        with self._lock:
+            self._failures[client] = self._recent(client) + [self._clock()]
+
+    def reset(self, client: str) -> None:
+        with self._lock:
+            self._failures.pop(client, None)
+
+
+def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
     media_dir = settings.data_dir / "clips"
+    throttle = throttle or LoginThrottle()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             log.debug(fmt, *args)
 
+        def _client(self) -> str:
+            # Railway's proxy appends the real address last; earlier entries can be forged.
+            forwarded = self.headers.get("X-Forwarded-For", "").split(",")[-1].strip()
+            return forwarded or self.client_address[0]
+
         def _authorized(self) -> bool:
+            self._locked = False
             if not settings.dashboard_password:
+                return False
+            client = self._client()
+            if throttle.blocked(client):
+                self._locked = True
                 return False
             header = self.headers.get("Authorization", "")
             if not header.startswith("Basic "):
@@ -462,9 +508,19 @@ def make_handler(settings: Settings):
                 _, _, password = base64.b64decode(header[6:]).decode().partition(":")
             except Exception:
                 return False
-            return hmac.compare_digest(password, settings.dashboard_password)
+            if hmac.compare_digest(password, settings.dashboard_password):
+                throttle.reset(client)
+                return True
+            throttle.fail(client)
+            return False
 
         def _deny(self) -> None:
+            if self._locked:
+                self.send_response(429)
+                self.send_header("Retry-After", str(LOCKOUT_SECONDS))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             self.send_response(401)
             self.send_header("WWW-Authenticate", 'Basic realm="clip-engine"')
             self.end_headers()
@@ -496,6 +552,23 @@ def make_handler(settings: Settings):
                 return self._deny()
             query = {k: v[0] for k, v in parse_qs(url.query).items()}
             self._page(notice=query.get("notice", ""), error=query.get("error", ""), edit_id=query.get("edit", ""))
+
+        def _youtube_disconnect(self, conn) -> None:
+            """Cancel the saved login at Google, forget it and stop automatic YouTube posting."""
+            token = youtube.stored_token(conn, settings)
+            try:
+                cancelled = youtube.revoke(token)
+            except Exception:
+                log.exception("YouTube token revoke failed")
+                cancelled = False
+            db.put(conn, "youtube_refresh_token", "")
+            db.put(conn, "youtube_auto", "off")
+            msg = ("YouTube disconnected and the login cancelled at Google." if cancelled else
+                   "YouTube disconnected here, but Google didn't confirm the cancel. Also remove Clip Engine at "
+                   "myaccount.google.com/permissions.")
+            if settings.youtube_refresh_token:
+                msg += " Delete the YOUTUBE_REFRESH_TOKEN variable in Railway too."
+            return self._redirect("/?" + urlencode({"notice": msg}))
 
         def _youtube_test(self, conn) -> None:
             """Upload a tiny unlisted video and report whether Google kept it private."""
@@ -646,6 +719,8 @@ def make_handler(settings: Settings):
                         db.put(conn, "youtube_private_lock", "")
                 elif self.path == "/settings/youtube-test":
                     return self._youtube_test(conn)
+                elif self.path == "/settings/youtube-disconnect":
+                    return self._youtube_disconnect(conn)
                 elif self.path == "/settings/ramp":
                     db.put(conn, "ramp", "off" if db.get(conn, "ramp", "on") == "on" else "on")
                 else:

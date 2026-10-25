@@ -702,3 +702,73 @@ def test_dashboard_test_button(yt_server, monkeypatch):
     assert "audit needed" in _get(base + "/", "s3cret").read().decode()
     db.put(conn, "youtube_private_lock", "vid9")
     assert "Google kept an automatic upload private" in _get(base + "/", "s3cret").read().decode()
+
+
+# --- security: cancel the YouTube login, lock out password guessing ------------
+
+def test_revoke_asks_google_to_cancel_the_token():
+    http = MagicMock()
+    http.post.return_value = MagicMock(status_code=200)
+    assert youtube.revoke("R", http) is True
+    assert http.post.call_args.args[0] == youtube.REVOKE_URL and http.post.call_args.kwargs["data"] == {"token": "R"}
+    http.post.return_value = MagicMock(status_code=400)
+    assert youtube.revoke("R", http) is False
+    assert youtube.revoke("", http) is False
+
+
+def test_disconnect_cancels_and_forgets_the_login(yt_server, monkeypatch):
+    base, conn, _ = yt_server
+    db.put(conn, "youtube_refresh_token", "R")
+    db.put(conn, "youtube_auto", "on")
+    revoked = []
+    monkeypatch.setattr(youtube, "revoke", lambda token, http=None: revoked.append(token) or True)
+    page = _get(base + "/settings/youtube-disconnect", "s3cret", data=b"").read().decode()
+    assert revoked == ["R"] and "login cancelled at Google" in page
+    assert not youtube.stored_token(conn, Settings(youtube_refresh_token="")) and not youtube.auto_posting_on(conn)
+    assert "Connect YouTube</a>" in page
+
+
+def test_disconnect_says_so_when_google_does_not_confirm(yt_server, monkeypatch):
+    base, conn, _ = yt_server
+    db.put(conn, "youtube_refresh_token", "R")
+    monkeypatch.setattr(youtube, "revoke", lambda token, http=None: (_ for _ in ()).throw(OSError("offline")))
+    page = _get(base + "/settings/youtube-disconnect", "s3cret", data=b"").read().decode()
+    assert "myaccount.google.com/permissions" in page and not db.get(conn, "youtube_refresh_token")
+
+
+def test_login_throttle_locks_out_after_five_wrong_passwords():
+    now = [0.0]
+    throttle = dashboard.LoginThrottle(clock=lambda: now[0])
+    for _ in range(dashboard.MAX_BAD_PASSWORDS):
+        assert not throttle.blocked("1.2.3.4")
+        throttle.fail("1.2.3.4")
+    assert throttle.blocked("1.2.3.4") and not throttle.blocked("5.6.7.8")
+    now[0] += dashboard.LOCKOUT_SECONDS + 1
+    assert not throttle.blocked("1.2.3.4")
+    throttle.fail("1.2.3.4")
+    throttle.reset("1.2.3.4")
+    assert not throttle.blocked("1.2.3.4")
+
+
+def test_dashboard_locks_out_a_guesser_but_not_the_owner_elsewhere(tmp_path):
+    from http.server import ThreadingHTTPServer
+    settings = Settings(data_dir=tmp_path, dashboard_password="s3cret", port=0)
+    db.connect(settings.db_path)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), dashboard.make_handler(settings))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        def status(password, forwarded):
+            req = urllib.request.Request(base + "/")
+            req.add_header("X-Forwarded-For", f"9.9.9.9, {forwarded}")
+            req.add_header("Authorization", "Basic " + base64.b64encode(f"me:{password}".encode()).decode())
+            try:
+                return urllib.request.urlopen(req, timeout=5).status
+            except urllib.error.HTTPError as err:
+                return err.code
+        assert [status("wrong", "6.6.6.6") for _ in range(dashboard.MAX_BAD_PASSWORDS)] == [401] * 5
+        assert status("wrong", "6.6.6.6") == 429
+        assert status("s3cret", "6.6.6.6") == 429  # even the right password waits out the lockout
+        assert status("s3cret", "7.7.7.7") == 200  # a different address is unaffected
+    finally:
+        srv.shutdown()

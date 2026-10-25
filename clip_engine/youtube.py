@@ -22,6 +22,7 @@ SCOPES = [
 CATEGORY_EDUCATION = "27"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
+REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 
 
 def redirect_uri(settings: Settings) -> str:
@@ -46,6 +47,13 @@ def exchange_code(settings: Settings, code: str, http=None) -> str:
     if "refresh_token" not in data:
         raise ValueError(data.get("error_description") or data.get("error") or "Google didn't return a login token")
     return data["refresh_token"]
+
+
+def revoke(token: str, http=None) -> bool:
+    """Ask Google to cancel a login token so it stops working everywhere. True if Google accepted it."""
+    if not token:
+        return False
+    return (http or requests).post(REVOKE_URL, data={"token": token}, timeout=30).status_code == 200
 
 
 def stored_token(conn: sqlite3.Connection, settings: Settings) -> str:

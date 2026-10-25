@@ -102,6 +102,10 @@ Use company accounts for all of these so the business can be transferred to a bu
 3. Generate a long-lived token and put it and the account's user ID into Railway. The engine refreshes the token weekly.
 4. Submit for **App Review** to post on accounts other than the app's testers.
 
+## Security
+
+See `SECURITY.md` for where each secret lives, how to rotate it and what to do after an incident. The dashboard's YouTube card has a **Disconnect and cancel login** button.
+
 ## Run locally
 
 ```bash
