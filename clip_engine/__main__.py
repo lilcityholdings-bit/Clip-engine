@@ -115,7 +115,10 @@ def main(argv: list[str]) -> int:
         return 0
 
     claude = anthropic.Anthropic()
-    settings, yt, pubs = build_publishers(conn, settings)
+    # base holds only the Railway variables. The saved YouTube login is layered on top each time, so
+    # a Disconnect isn't undone by an old copy of the login kept in memory.
+    base = settings
+    settings, yt, pubs = build_publishers(conn, base)
     if command == "produce":
         pipeline.produce(conn, settings, claude, yt, pubs, CLIPS_PER_CYCLE)
     elif command == "publish":
@@ -123,13 +126,13 @@ def main(argv: list[str]) -> int:
     elif command == "score":
         pipeline.score(conn, settings, pubs)
     elif command == "run":
-        dashboard.start(settings)
-        signature = connection_signature(conn, settings)
+        dashboard.start(base)
+        signature = connection_signature(conn, base)
         while True:
-            # Picks up Connect YouTube and the automatic-posting switch without a restart.
-            if connection_signature(conn, settings) != signature:
-                signature = connection_signature(conn, settings)
-                settings, yt, pubs = build_publishers(conn, settings)
+            # Picks up Connect, Disconnect and the automatic-posting switch without a restart.
+            if connection_signature(conn, base) != signature:
+                signature = connection_signature(conn, base)
+                settings, yt, pubs = build_publishers(conn, base)
             tick(conn, settings, claude, yt, pubs)
             time.sleep(TICK_MINUTES * 60)
     else:

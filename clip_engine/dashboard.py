@@ -608,6 +608,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                 cancelled = False
             db.put(conn, "youtube_refresh_token", "")
             db.put(conn, "youtube_auto", "off")
+            db.put(conn, "youtube_test_result", "")  # a new login gets tested again
             msg = ("YouTube disconnected and the login cancelled at Google." if cancelled else
                    "YouTube disconnected here, but Google didn't confirm the cancel. Also remove Clip Engine at "
                    "myaccount.google.com/permissions.")

@@ -723,7 +723,8 @@ def test_disconnect_cancels_and_forgets_the_login(yt_server, monkeypatch):
     revoked = []
     monkeypatch.setattr(youtube, "revoke", lambda token, http=None: revoked.append(token) or True)
     page = _get(base + "/settings/youtube-disconnect", "s3cret", data=b"").read().decode()
-    assert revoked == ["R"] and "login cancelled at Google" in page
+    assert revoked == ["R"] and "login cancelled at Google" in page and "YOUTUBE_REFRESH_TOKEN" not in page
+    assert not db.get(conn, "youtube_test_result")
     assert not youtube.stored_token(conn, Settings(youtube_refresh_token="")) and not youtube.auto_posting_on(conn)
     assert "Connect YouTube</a>" in page
 
@@ -772,3 +773,20 @@ def test_dashboard_locks_out_a_guesser_but_not_the_owner_elsewhere(tmp_path):
         assert status("s3cret", "7.7.7.7") == 200  # a different address is unaffected
     finally:
         srv.shutdown()
+
+
+def test_disconnect_is_not_undone_by_the_login_kept_in_memory(tmp_path, monkeypatch):
+    from clip_engine import __main__ as m
+    base = Settings(data_dir=tmp_path, youtube_client_id="c", youtube_client_secret="s", youtube_refresh_token="")
+    conn = db.connect(base.db_path)
+    monkeypatch.setattr(m, "YouTube", lambda s: MagicMock(name="yt"))
+    db.put(conn, "youtube_refresh_token", "R")
+    settings, yt, _ = m.build_publishers(conn, base)
+    assert settings.youtube_refresh_token == "R" and yt is not None
+    before = m.connection_signature(conn, base)
+    db.put(conn, "youtube_refresh_token", "")  # Disconnect
+    assert m.connection_signature(conn, base) != before
+    settings, yt, _ = m.build_publishers(conn, base)
+    assert yt is None and not youtube.stored_token(conn, base)
+    # the bug: the merged settings still carry the old login and would bring it back
+    assert youtube.stored_token(conn, Settings(youtube_refresh_token="R")) == "R"
