@@ -70,3 +70,14 @@ def test_paused_does_nothing(tmp_path, monkeypatch):
     db.put(conn, "paused", "1")
     monkeypatch.setattr(pipeline, "publish_due", lambda *a: (_ for _ in ()).throw(AssertionError("posted")))
     main_mod.tick(conn, settings, {})
+
+
+def test_hourly_wake_a_little_early_still_counts(tmp_path, monkeypatch):
+    conn = db.connect(tmp_path / "x.db")
+    now = [1_000_000.0]
+    monkeypatch.setattr(main_mod.time, "time", lambda: now[0])
+    assert main_mod.due(conn, "last_score", 1)
+    now[0] += 3600 - 25  # the next wake-up lands 25 seconds short of the hour
+    assert main_mod.due(conn, "last_score", 1)
+    now[0] += 5 * 60  # but a tick a few minutes later doesn't run it twice
+    assert not main_mod.due(conn, "last_score", 1)

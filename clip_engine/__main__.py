@@ -31,10 +31,15 @@ CLIPS_PER_CYCLE = 2
 log = logging.getLogger("clip_engine")
 
 
+# The hourly wake-up never lands on exactly the same second, so "every hour" allows a little early.
+# Without it, a wake 30 seconds short of the hour would push the task back a whole hour.
+DUE_GRACE_SECONDS = 10 * 60
+
+
 def due(conn, key: str, every_hours: float) -> bool:
     """True (and records the run) if the task hasn't run in the last every_hours."""
     last = float(db.get(conn, key, "0"))
-    if time.time() - last < every_hours * 3600:
+    if time.time() - last < every_hours * 3600 - DUE_GRACE_SECONDS:
         return False
     db.put(conn, key, str(time.time()))
     return True
