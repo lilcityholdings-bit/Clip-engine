@@ -18,6 +18,7 @@ GET  /privacy          public privacy policy (Google asks for one)
 GET  /connect/youtube  start Google sign-in; /oauth/youtube/callback finishes it
 """
 import base64
+import hashlib
 import hmac
 import html
 import json
@@ -514,24 +515,27 @@ LOCKOUT_SECONDS = 15 * 60
 
 
 class LoginThrottle:
-    """Locks an address out for 15 minutes after 5 wrong passwords, so the password can't be guessed."""
+    """Locks an address out for 15 minutes after 5 different wrong passwords, so the password can't
+    be guessed. The same wrong password counts once: after a password change, browsers keep
+    resending the old one with every request, and that shouldn't lock the owner out."""
 
     def __init__(self, clock=time.monotonic):
         self._clock = clock
-        self._failures: dict[str, list[float]] = {}
+        self._failures: dict[str, dict[str, float]] = {}  # address -> hash of wrong password -> when
         self._lock = threading.Lock()
 
-    def _recent(self, client: str) -> list[float]:
+    def _recent(self, client: str) -> dict[str, float]:
         cutoff = self._clock() - LOCKOUT_SECONDS
-        return [t for t in self._failures.get(client, []) if t > cutoff]
+        return {h: t for h, t in self._failures.get(client, {}).items() if t > cutoff}
 
     def blocked(self, client: str) -> bool:
         with self._lock:
             return len(self._recent(client)) >= MAX_BAD_PASSWORDS
 
-    def fail(self, client: str) -> None:
+    def fail(self, client: str, password: str) -> None:
+        digest = hashlib.sha256(password.encode()).hexdigest()
         with self._lock:
-            self._failures[client] = self._recent(client) + [self._clock()]
+            self._failures[client] = {**self._recent(client), digest: self._clock()}
 
     def reset(self, client: str) -> None:
         with self._lock:
@@ -569,7 +573,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
             if hmac.compare_digest(password, settings.dashboard_password):
                 throttle.reset(client)
                 return True
-            throttle.fail(client)
+            throttle.fail(client, password)
             return False
 
         def _deny(self) -> None:

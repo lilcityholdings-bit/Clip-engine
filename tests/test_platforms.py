@@ -740,13 +740,15 @@ def test_disconnect_says_so_when_google_does_not_confirm(yt_server, monkeypatch)
 def test_login_throttle_locks_out_after_five_wrong_passwords():
     now = [0.0]
     throttle = dashboard.LoginThrottle(clock=lambda: now[0])
-    for _ in range(dashboard.MAX_BAD_PASSWORDS):
-        assert not throttle.blocked("1.2.3.4")
-        throttle.fail("1.2.3.4")
+    for _ in range(20):  # a browser resending the old password after a change: counts once
+        throttle.fail("1.2.3.4", "old-password")
+    assert not throttle.blocked("1.2.3.4")
+    for i in range(dashboard.MAX_BAD_PASSWORDS - 1):
+        throttle.fail("1.2.3.4", f"guess{i}")
     assert throttle.blocked("1.2.3.4") and not throttle.blocked("5.6.7.8")
     now[0] += dashboard.LOCKOUT_SECONDS + 1
     assert not throttle.blocked("1.2.3.4")
-    throttle.fail("1.2.3.4")
+    throttle.fail("1.2.3.4", "x")
     throttle.reset("1.2.3.4")
     assert not throttle.blocked("1.2.3.4")
 
@@ -767,7 +769,8 @@ def test_dashboard_locks_out_a_guesser_but_not_the_owner_elsewhere(tmp_path):
                 return urllib.request.urlopen(req, timeout=5).status
             except urllib.error.HTTPError as err:
                 return err.code
-        assert [status("wrong", "6.6.6.6") for _ in range(dashboard.MAX_BAD_PASSWORDS)] == [401] * 5
+        assert [status("stale", "6.6.6.6") for _ in range(8)] == [401] * 8  # same old password: no lockout
+        assert [status(f"guess{i}", "6.6.6.6") for i in range(dashboard.MAX_BAD_PASSWORDS - 1)] == [401] * 4
         assert status("wrong", "6.6.6.6") == 429
         assert status("s3cret", "6.6.6.6") == 429  # even the right password waits out the lockout
         assert status("s3cret", "7.7.7.7") == 200  # a different address is unaffected

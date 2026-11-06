@@ -27,7 +27,7 @@ Nothing secret goes into git. `.env.example` lists the names only.
 
 ## Built-in protections
 
-- The dashboard locks an address out for 15 minutes after 5 wrong passwords.
+- The dashboard locks an address out for 15 minutes after 5 different wrong passwords (a browser resending an old password after a change counts once).
 - Review mode holds every clip until it is approved.
 - If Google keeps an automatic upload private, automatic YouTube posting switches itself off.
 - Accounts used by the engine should have two-factor authentication, spending caps and no more permissions than needed.
