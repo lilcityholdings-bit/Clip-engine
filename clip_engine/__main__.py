@@ -93,7 +93,8 @@ def tick(conn, settings: Settings, pubs) -> None:
     """One pass of the scheduler. Every step is isolated so one failure doesn't stop the rest."""
     if db.get(conn, "paused") == "1":
         return
-    steps = [("publish", lambda: pipeline.publish_due(conn, settings, pubs))]
+    steps = [("publish", lambda: pipeline.publish_due(conn, settings, pubs)),
+             ("alerts", lambda: pipeline.send_alerts(conn, settings.digest_webhook_url, settings.public_base_url))]
     if due(conn, "last_score", SCORE_EVERY_HOURS):
         steps += [("score", lambda: pipeline.score(conn, settings, pubs)),
                   ("views", lambda: pipeline.refresh_views(conn, pubs)),

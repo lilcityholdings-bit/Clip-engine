@@ -548,6 +548,43 @@ def notify(webhook_url: str, text: str, http=None) -> None:
         log.exception("could not send notification")
 
 
+PLATFORM_LABELS = {"youtube": "YouTube", "tiktok": "TikTok", "instagram": "Instagram"}
+
+
+def send_alerts(conn: sqlite3.Connection, webhook_url: str, dashboard_url: str, http=None) -> int:
+    """Message your phone once when clips are waiting for approval and once when a clip you post
+    yourself is due. Returns how many things were announced."""
+    if not webhook_url:
+        return 0
+    alerted = json.loads(db.get(conn, "alerted", "[]"))
+    seen = set(alerted)
+    lines, new = [], []
+    waiting = conn.execute("SELECT DISTINCT c.id, c.title FROM clips c JOIN posts p ON p.clip_id = c.id"
+                           " WHERE p.status = 'review' ORDER BY c.id").fetchall()
+    fresh = [r for r in waiting if f"review:{r['id']}" not in seen]
+    if fresh:
+        lines.append(f"{len(fresh)} new clip{'s' if len(fresh) > 1 else ''} waiting for your approval: "
+                     + "; ".join(r["title"] for r in fresh[:5]))
+        new += [f"review:{r['id']}" for r in fresh]
+    due = conn.execute("SELECT p.id, p.platform, c.title FROM posts p JOIN clips c ON c.id = p.clip_id"
+                       " WHERE p.status = 'ready' AND p.scheduled_at <= datetime('now') ORDER BY p.id").fetchall()
+    for r in due:
+        if f"ready:{r['id']}" not in seen:
+            lines.append(f"Time to post on {PLATFORM_LABELS.get(r['platform'], r['platform'])}: {r['title']}")
+            new.append(f"ready:{r['id']}")
+    if not lines:
+        return 0
+    if dashboard_url:
+        lines.append(f"Open the dashboard: {dashboard_url}")
+    body = "\n".join(lines)
+    import requests  # local import keeps the module light for tests
+
+    resp = (http or requests).post(webhook_url, json={"content": body[:1900], "text": body}, timeout=30)
+    resp.raise_for_status()
+    db.put(conn, "alerted", json.dumps((alerted + new)[-500:]))
+    return len(new)
+
+
 def send_digest(conn: sqlite3.Connection, webhook_url: str, http=None) -> int:
     """Post links awaiting submission to a Discord/Slack-style webhook, then mark them sent.
 

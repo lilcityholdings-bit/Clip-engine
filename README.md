@@ -76,6 +76,10 @@ Whop has no API for submitting clips, so new post links go to `DIGEST_WEBHOOK_UR
 - **Gradual start** protects new accounts from looking like spam: up to 4 clips a day in the first week, then `MAX_CLIPS_PER_DAY` (6). It can be switched off under Settings.
 - Clip-making runs in the background, so scheduled posts go out on time even during a long transcription. A 10-minute video needs about 0.9 GB of memory and a few minutes of CPU.
 
+## Phone alerts
+
+Set `DIGEST_WEBHOOK_URL` to a Discord channel webhook (free; the Discord app gives push notifications). Within 5 minutes the engine messages you once when new clips are waiting for approval, and once when a clip you post by hand (TikTok, or Instagram until it's connected) reaches its posting time. Once an hour it also sends the new post links to paste into Whop. Use a Discord server owned by the company so it can be handed over.
+
 ## Keeping Railway costs down
 
 Railway bills memory and CPU by the minute, so the always-on part is kept small:

@@ -462,3 +462,23 @@ def test_posting_ramps_up_for_new_accounts(conn, tmp_path):
     conn.execute("UPDATE clips SET created_at = datetime('now', '-1 day')")
     db.put(conn, "ramp", "off")
     assert pipeline.daily_clip_limit(conn, settings) == 6
+
+
+def test_alerts_announce_review_and_due_posts_once(tmp_path):
+    conn = connect(tmp_path / "a.db")
+    conn.execute("INSERT INTO sources VALUES ('s', 't', 'c', 'l', 'u', 'x', NULL)")
+    for title in ("First clip", "Second clip"):
+        conn.execute("INSERT INTO clips (source_identifier, start_sec, end_sec, title, description, tags, arms)"
+                     " VALUES ('s', 0, 1, ?, 'd', '[]', '{}')", (title,))
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (1, 'youtube', 'review', datetime('now'))")
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (2, 'tiktok', 'ready', datetime('now', '-1 minute'))")
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (2, 'instagram', 'ready', datetime('now', '+2 hours'))")
+    conn.commit()
+    http = MagicMock()
+    assert pipeline.send_alerts(conn, "", "https://d.example", http) == 0 and not http.post.called
+    assert pipeline.send_alerts(conn, "https://hook", "https://d.example", http) == 2
+    body = http.post.call_args.kwargs["json"]["content"]
+    assert "1 new clip waiting for your approval: First clip" in body
+    assert "Time to post on TikTok: Second clip" in body and "Instagram" not in body and "https://d.example" in body
+    http.reset_mock()
+    assert pipeline.send_alerts(conn, "https://hook", "https://d.example", http) == 0 and not http.post.called
