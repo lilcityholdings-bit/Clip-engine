@@ -5,15 +5,23 @@ Every external account and dependency this product relies on. Keep it current, b
 | Asset | Purpose | Owner account | Transfer method |
 |---|---|---|---|
 | GitHub repo `clip-engine` | Source code | lilcityholdings-bit | GitHub repo transfer |
-| YouTube channel (Brand Account) | Where clips are published | Company Google account (TBD) | Add new primary owner, then remove old owner |
-| Google Cloud project | YouTube API credentials and quota | Company Google account (TBD) | IAM: add buyer as Owner |
+| YouTube channel @littlecityclips ("Little City Clips") | Where clips are published | littlecitydigital@gmail.com; still to move into a Brand Account | Brand Account: add buyer as primary owner, then remove old owner |
+| Google Cloud project `clip-engine-512213` | YouTube API OAuth client (secret rotated 2026-10-30) | Company Google account (verify: littlecitydigital@gmail.com) | IAM: add buyer as Owner |
 | Anthropic API key | Picks clips and writes titles | Company Anthropic org (TBD) | Buyer issues their own key |
-| TikTok account + TikTok developer app | Posting clips (Content Posting API) | Company account (TBD) | Transfer account login; buyer re-authorizes the app |
-| Instagram professional account + Meta app | Posting Reels | Company Meta Business account (TBD) | Transfer via Meta Business Suite |
+| TikTok account | Clips posted from the phone (no developer app; see STATUS) | ceorob321@gmail.com (owner's email; recommended to move to littlecitydigital@gmail.com) | Change the account email to the buyer's, hand over the login |
+| Instagram professional account + Meta app | Posting Reels | ceorob321@gmail.com (owner's email; recommended to move to littlecitydigital@gmail.com); Meta app not created yet | Change the account email to the buyer's; transfer via Meta Business Suite |
 | Ayrshare account | Posting to YouTube, TikTok and Instagram without developer apps | Company email (TBD) | Transfer account; buyer reconnects social accounts |
 | Discord/Slack webhook | Links to submit and failure alerts | Company workspace (TBD) | Buyer creates their own webhook |
 | Clipping program memberships (e.g. Whop) | Paid campaigns and payouts | Company account (TBD) | Buyer rejoins programs; payouts to company bank account |
-| Railway project `clip-engine` | Hosting, plus a volume for the database | Company Railway account (TBD) | Railway project transfer |
+| Railway project `clip-engine` | Hosting, plus a volume for the database | lilcityholdings@gmail.com (passkey 2FA) | Railway project transfer |
+
+## Business emails
+
+- lilcityholdings@gmail.com: Railway and the GitHub organization.
+- littlecitydigital@gmail.com: the Clip Engine business email (YouTube channel, Google Cloud, password manager). New Clip Engine accounts (Whop, Anthropic) should use it.
+- ceorob321@gmail.com: the owner's email; currently on TikTok and Instagram.
+
+Passwords live in Google Password Manager under littlecitydigital@gmail.com, never in this repo.
 
 ## Content sources and licenses
 
