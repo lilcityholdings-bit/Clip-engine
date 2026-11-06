@@ -7,11 +7,13 @@ python -m clip_engine score      # one scoring cycle
 python -m clip_engine report     # what the strategy has learned, earnings, links to submit
 """
 import logging
+import os
+import subprocess
 import sys
-import threading
 import time
 
 import anthropic
+import requests
 
 from . import dashboard, db, pipeline, platforms, strategy
 from .config import Settings
@@ -19,6 +21,9 @@ from . import youtube
 from .youtube import YouTube
 
 TICK_MINUTES = 5
+# While clips are being made, touch the network this often. Railway puts a sleeping-enabled service to
+# sleep after 10 minutes without outbound traffic, and a long transcription makes none.
+KEEP_AWAKE_URL = "https://www.gstatic.com/generate_204"
 PRODUCE_EVERY_HOURS = 3
 SCORE_EVERY_HOURS = 1
 CLIPS_PER_CYCLE = 2
@@ -35,7 +40,7 @@ def due(conn, key: str, every_hours: float) -> bool:
     return True
 
 
-_producer: threading.Thread | None = None
+_producer: subprocess.Popen | None = None
 
 
 def connection_signature(conn, settings: Settings) -> tuple:
@@ -54,28 +59,32 @@ def build_publishers(conn, base_settings: Settings):
     return settings, yt, pubs
 
 
-def start_producer(settings: Settings, claude, publishers: dict) -> threading.Thread:
-    """Make clips in the background: a cycle can take half an hour, and scheduled posts
-    must keep going out meanwhile. The thread uses its own database and API clients."""
+def start_producer() -> subprocess.Popen:
+    """Make clips in a separate process. Whisper and the video frames need up to 3 GB; when the
+    process exits that memory goes back, so the always-on part stays small (Railway bills memory
+    by the minute). Scheduled posts keep going out meanwhile."""
     global _producer
-
-    def run() -> None:
-        conn = db.connect(settings.db_path)
-        try:
-            yt = YouTube(settings) if settings.youtube_refresh_token else None
-            pipeline.produce(conn, settings, claude, yt, publishers, CLIPS_PER_CYCLE)
-        except Exception as exc:
-            log.exception("produce failed; will retry next cycle")
-            pipeline.notify(settings.digest_webhook_url, f"clip-engine: produce failed and will retry: {exc!r}")
-        finally:
-            conn.close()
-
-    _producer = threading.Thread(target=run, daemon=True, name="producer")
-    _producer.start()
+    _producer = subprocess.Popen([sys.executable, "-m", "clip_engine", "produce"])
     return _producer
 
 
-def tick(conn, settings: Settings, claude, yt, pubs) -> None:
+def producing() -> bool:
+    return _producer is not None and _producer.poll() is None
+
+
+def can_produce() -> bool:
+    """Clips need Claude. Without a key, skip the download and transcription instead of failing after them."""
+    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
+def keep_awake() -> None:
+    try:
+        requests.head(KEEP_AWAKE_URL, timeout=10)
+    except requests.RequestException:
+        pass
+
+
+def tick(conn, settings: Settings, pubs) -> None:
     """One pass of the scheduler. Every step is isolated so one failure doesn't stop the rest."""
     if db.get(conn, "paused") == "1":
         return
@@ -84,10 +93,10 @@ def tick(conn, settings: Settings, claude, yt, pubs) -> None:
         steps += [("score", lambda: pipeline.score(conn, settings, pubs)),
                   ("views", lambda: pipeline.refresh_views(conn, pubs)),
                   ("digest", lambda: pipeline.send_digest(conn, settings.digest_webhook_url))]
-    producing = _producer is not None and _producer.is_alive()
-    if not producing and (db.get(conn, "run_now") == "1" or due(conn, "last_produce", PRODUCE_EVERY_HOURS)):
+    if can_produce() and not producing() and (
+            db.get(conn, "run_now") == "1" or due(conn, "last_produce", PRODUCE_EVERY_HOURS)):
         db.put(conn, "run_now", "0")
-        start_producer(settings, claude, pubs)
+        start_producer()
     for name, fn in steps:
         try:
             fn()
@@ -114,13 +123,17 @@ def main(argv: list[str]) -> int:
             print(f"  [{row['campaign_id']}] {row['platform']:9} {row['url']}  {row['title']}")
         return 0
 
-    claude = anthropic.Anthropic()
     # base holds only the Railway variables. The saved YouTube login is layered on top each time, so
     # a Disconnect isn't undone by an old copy of the login kept in memory.
     base = settings
     settings, yt, pubs = build_publishers(conn, base)
     if command == "produce":
-        pipeline.produce(conn, settings, claude, yt, pubs, CLIPS_PER_CYCLE)
+        try:
+            pipeline.produce(conn, settings, anthropic.Anthropic(), yt, pubs, CLIPS_PER_CYCLE)
+        except Exception as exc:
+            log.exception("produce failed; will retry next cycle")
+            pipeline.notify(settings.digest_webhook_url, f"clip-engine: produce failed and will retry: {exc!r}")
+            return 1
     elif command == "publish":
         pipeline.publish_due(conn, settings, pubs)
     elif command == "score":
@@ -133,7 +146,9 @@ def main(argv: list[str]) -> int:
             if connection_signature(conn, base) != signature:
                 signature = connection_signature(conn, base)
                 settings, yt, pubs = build_publishers(conn, base)
-            tick(conn, settings, claude, yt, pubs)
+            tick(conn, settings, pubs)
+            if producing():
+                keep_awake()
             time.sleep(TICK_MINUTES * 60)
     else:
         print(__doc__)

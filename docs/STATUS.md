@@ -7,7 +7,7 @@ Last updated 2026-11-06. The plain-language state of the product, for the owner,
 An automated clipping business. Creators in paid clipping programs (for example Whop Content Rewards) pay per 1,000 views for short clips of their videos. Clip Engine finds the creator's newest videos, cuts the best moments into Shorts with word-by-word captions, writes titles, hashtags and #ad disclosure, posts or prepares them for YouTube, TikTok and Instagram, tracks views and estimated earnings, and learns which choices earn the most (Thompson sampling).
 
 - Code: github.com/lilcityholdings-bit/Clip-engine (branch `main`). Tests: `python -m pytest` (120 passing).
-- Hosting: Railway project `clip-engine`, service `clip-engine`, volume `clip-engine-data` at `/data`.
+- Hosting: Railway project `clip-engine`, service `clip-engine` (sleep mode on), volume `clip-engine-data` at `/data`, and cron service `wake-clip-engine` that wakes it hourly. See README, Keeping Railway costs down.
 - Dashboard: https://clip-engine-production-f966.up.railway.app (password = Railway variable `DASHBOARD_PASSWORD`).
 - Setup, deploy and platform docs: `README.md`. Secrets and incident procedure: `SECURITY.md`. Accounts: `docs/ASSETS.md`.
 
@@ -29,7 +29,7 @@ Open, in order
 
 ## Costs (estimates)
 
-Claude API ~$10-20/month at 4-6 clips/day; Railway ~$5-20/month (about 2 GB RAM worker plus volume); platform APIs free. Optional: licensed music subscription.
+Claude API ~$10-20/month at 4-6 clips/day; Railway: idle memory cut from ~0.8 GB around the clock to ~0.1 GB for about a quarter of each hour (Nov 2026), so expect a few dollars a month, likely inside the plan's included usage; platform APIs free. Optional: licensed music subscription.
 
 ## Decisions on record
 

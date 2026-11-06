@@ -75,6 +75,18 @@ Whop has no API for submitting clips, so new post links go to `DIGEST_WEBHOOK_UR
 - **Gradual start** protects new accounts from looking like spam: up to 4 clips a day in the first week, then `MAX_CLIPS_PER_DAY` (6). It can be switched off under Settings.
 - Clip-making runs in the background, so scheduled posts go out on time even during a long transcription. A 10-minute video needs about 0.9 GB of memory and a few minutes of CPU.
 
+## Keeping Railway costs down
+
+Railway bills memory and CPU by the minute, so the engine is built to sleep:
+
+- **Sleep mode** (Railway's Serverless setting) is on. The service sleeps after 10 minutes with no outbound traffic and costs nothing while asleep. Opening the dashboard wakes it; the first page takes a few seconds.
+- A tiny **`wake-clip-engine`** cron service (Alpine, `wget` the `/health` page at 2 minutes past every hour) wakes it to post what's due, check views and make clips on schedule. It runs for a second each hour.
+- Clips are made in a **separate process** (`python -m clip_engine produce`), so Whisper's memory (up to 3 GB) is released when it finishes. The always-on part uses about 100 MB.
+- While clips are being made, the engine touches the network every 5 minutes so Railway doesn't put it to sleep mid-transcription.
+- Without `ANTHROPIC_API_KEY`, no clips are made at all, so nothing is downloaded or transcribed for nothing.
+
+Posts are scheduled on the hour, and the hourly wake publishes them. If you ever turn sleep mode off, the engine works the same, just always on.
+
 ## Dashboard
 
 Open `PUBLIC_BASE_URL` in a browser and sign in with any username and `DASHBOARD_PASSWORD`. It shows:

@@ -1,40 +1,67 @@
-import threading
+import subprocess
 
 from clip_engine import __main__ as main_mod
 from clip_engine import db, pipeline
 from clip_engine.config import Settings
 
 
-def test_production_runs_in_background_and_posting_continues(tmp_path, monkeypatch):
-    settings = Settings(data_dir=tmp_path)
-    conn = db.connect(settings.db_path)
-    release = threading.Event()
-    started, published = [], []
+class FakeProcess:
+    def __init__(self):
+        self.done = False
 
-    def slow_produce(c, s, claude, yt, pubs, n):
-        started.append(sorted(pubs))
-        release.wait(5)
-        return 0
-    monkeypatch.setattr(pipeline, "produce", slow_produce)
+    def poll(self):
+        return 0 if self.done else None
+
+
+def _quiet(monkeypatch, published):
     monkeypatch.setattr(pipeline, "publish_due", lambda c, s, p: published.append(1) or 0)
     monkeypatch.setattr(pipeline, "score", lambda *a: 0)
     monkeypatch.setattr(pipeline, "refresh_views", lambda *a: None)
     monkeypatch.setattr(pipeline, "send_digest", lambda *a: 0)
     monkeypatch.setattr(main_mod, "_producer", None)
 
-    main_mod.tick(conn, settings, None, None, {"youtube": object(), "tiktok": object()})
-    first = main_mod._producer
-    assert first is not None and first.is_alive()
-    db.put(conn, "run_now", "1")  # a second request while still producing is held, not doubled up
-    main_mod.tick(conn, settings, None, None, {"youtube": object()})
-    assert main_mod._producer is first and len(published) == 2  # posting kept running
-    release.set()
-    first.join(5)
-    assert started == [["tiktok", "youtube"]]
 
-    main_mod.tick(conn, settings, None, None, {"youtube": object()})  # held run_now now starts
-    main_mod._producer.join(5)
-    assert len(started) == 2
+def test_production_runs_in_its_own_process_and_posting_continues(tmp_path, monkeypatch):
+    settings = Settings(data_dir=tmp_path)
+    conn = db.connect(settings.db_path)
+    published, launched = [], []
+    _quiet(monkeypatch, published)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+
+    def popen(cmd, **kw):
+        launched.append(cmd[1:])
+        return FakeProcess()
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    main_mod.tick(conn, settings, {"youtube": object()})
+    first = main_mod._producer
+    assert launched == [["-m", "clip_engine", "produce"]] and main_mod.producing()
+    db.put(conn, "run_now", "1")  # a second request while still producing is held, not doubled up
+    main_mod.tick(conn, settings, {"youtube": object()})
+    assert main_mod._producer is first and len(launched) == 1 and len(published) == 2  # posting kept running
+    first.done = True
+    main_mod.tick(conn, settings, {"youtube": object()})  # held run_now now starts
+    assert len(launched) == 2
+
+
+def test_no_production_without_a_claude_key(tmp_path, monkeypatch):
+    settings = Settings(data_dir=tmp_path)
+    conn = db.connect(settings.db_path)
+    published = []
+    _quiet(monkeypatch, published)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("produced")))
+    db.put(conn, "run_now", "1")
+    main_mod.tick(conn, settings, {"youtube": object()})
+    assert published == [1] and not main_mod.producing()
+    assert db.get(conn, "run_now") == "1"  # Make clips now still runs once the key is added
+
+
+def test_keep_awake_never_raises(monkeypatch):
+    def boom(*a, **k):
+        raise main_mod.requests.ConnectionError("offline")
+    monkeypatch.setattr(main_mod.requests, "head", boom)
+    main_mod.keep_awake()
 
 
 def test_paused_does_nothing(tmp_path, monkeypatch):
@@ -42,4 +69,4 @@ def test_paused_does_nothing(tmp_path, monkeypatch):
     conn = db.connect(settings.db_path)
     db.put(conn, "paused", "1")
     monkeypatch.setattr(pipeline, "publish_due", lambda *a: (_ for _ in ()).throw(AssertionError("posted")))
-    main_mod.tick(conn, settings, None, None, {})
+    main_mod.tick(conn, settings, {})
