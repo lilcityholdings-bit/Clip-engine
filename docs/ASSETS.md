@@ -8,7 +8,7 @@ Every external account and dependency this product relies on. Keep it current, b
 | YouTube channel @littlecityclips ("Little City Clips") | Where clips are published | littlecitydigital@gmail.com; still to move into a Brand Account | Brand Account: add buyer as primary owner, then remove old owner |
 | Google Cloud project `clip-engine-512213` | YouTube API OAuth client (secret rotated 2026-10-30) | Company Google account (verify: littlecitydigital@gmail.com) | IAM: add buyer as Owner |
 | Anthropic API key | Picks clips and writes titles | Company Anthropic org (TBD) | Buyer issues their own key |
-| TikTok account | Clips posted from the phone (no developer app; see STATUS) | ceorob321@gmail.com (owner's email; recommended to move to littlecitydigital@gmail.com) | Change the account email to the buyer's, hand over the login |
+| TikTok account @littlecityclipz | Clips posted from the phone (no developer app; see STATUS) | ceorob321@gmail.com (owner's email; recommended to move to littlecitydigital@gmail.com) | Change the account email to the buyer's, hand over the login |
 | Instagram professional account + Meta app | Posting Reels | ceorob321@gmail.com (owner's email; recommended to move to littlecitydigital@gmail.com); Meta app not created yet | Change the account email to the buyer's; transfer via Meta Business Suite |
 | Ayrshare account | Posting to YouTube, TikTok and Instagram without developer apps | Company email (TBD) | Transfer account; buyer reconnects social accounts |
 | Discord/Slack webhook | Links to submit and failure alerts | Company workspace (TBD) | Buyer creates their own webhook |
