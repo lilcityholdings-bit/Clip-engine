@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from clip_engine import dashboard, db, platforms
+from clip_engine import dashboard, db, pipeline, platforms
 from clip_engine.config import Settings
 
 
@@ -342,7 +342,7 @@ def test_review_card_approve_and_reject(server, tmp_path):
     second = _queue_for_review(conn, tmp_path, token="d" * 32)
     page = _get(base + "/", "s3cret").read().decode()
     assert "Waiting for your approval (2)" in page and "Big reveal" in page
-    assert f'src="/media/{"c" * 32}.mp4"' in page and "posts to YouTube, TikTok" in page and "On-screen hook: <b>wait</b>" in page
+    assert f'src="/media/{"c" * 32}.mp4"' in page and 'name="platforms" value="youtube" checked> YouTube' in page and 'value="tiktok" checked> TikTok' in page and "On-screen hook: <b>wait</b>" in page
 
     _get(base + "/review/approve", "s3cret", data=f"id={first}".encode())
     _get(base + "/review/reject", "s3cret", data=f"id={second}".encode())
@@ -790,3 +790,27 @@ def test_disconnect_is_not_undone_by_the_login_kept_in_memory(tmp_path, monkeypa
     assert yt is None and not youtube.stored_token(conn, base)
     # the bug: the merged settings still carry the old login and would bring it back
     assert youtube.stored_token(conn, Settings(youtube_refresh_token="R")) == "R"
+
+
+# --- choosing accounts -------------------------------------------------------
+
+def test_approve_only_the_ticked_accounts(server, tmp_path):
+    base, conn = server
+    clip = _queue_for_review(conn, tmp_path)
+    page = _get(base + "/review/approve", "s3cret", data=f"id={clip}&choose=1".encode()).read().decode()
+    assert "Tick at least one account" in page
+    assert {r[0] for r in conn.execute("SELECT status FROM posts WHERE clip_id = ?", (clip,))} == {"review"}
+    _get(base + "/review/approve", "s3cret", data=f"id={clip}&choose=1&platforms=tiktok".encode())
+    rows = dict(conn.execute("SELECT platform, status FROM posts WHERE clip_id = ?", (clip,)).fetchall())
+    assert rows["youtube"] == "skipped" and rows["tiktok"] in ("queued", "ready")
+
+
+def test_default_accounts_setting(server, tmp_path):
+    base, conn = server
+    assert pipeline.post_to(conn) == ["youtube", "tiktok", "instagram"]
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Post new clips to:" in page
+    _get(base + "/settings/post-to", "s3cret", data=b"platforms=instagram&platforms=youtube")
+    assert pipeline.post_to(db.connect(tmp_path / "clip_engine.db")) == ["youtube", "instagram"]
+    page = _get(base + "/settings/post-to", "s3cret", data=b"").read().decode()
+    assert "Tick at least one account" in page

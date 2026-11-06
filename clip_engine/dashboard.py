@@ -7,6 +7,7 @@ POST /submitted        mark all pending campaign links as submitted
 POST /review/approve, /review/reject, /review/approve-all   decide on clips waiting for review
 POST /manual/save, /manual/skip   record (or skip) a clip you posted yourself from your phone
 POST /settings/review, /settings/ramp, /settings/youtube-auto, /settings/youtube-test   switch review mode / gradual start on or off
+POST /settings/post-to  accounts new clips are made for
 POST /settings/youtube-disconnect   cancel the saved YouTube login at Google and forget it
 POST /campaigns/save   add or update a campaign from the form
 POST /campaigns/toggle pause or resume one campaign
@@ -224,6 +225,13 @@ def _campaign_form(values: dict | None, editing: bool, open_form: bool) -> str:
 </form></details>"""
 
 
+def _platform_checks(platforms: list[str], checked: list[str] | None = None) -> str:
+    """A tick box per account, all ticked unless `checked` says otherwise."""
+    checked = platforms if checked is None else checked
+    return "".join(f'<label><input type="checkbox" name="platforms" value="{p}"{" checked" if p in checked else ""}> '
+                   f'{html.escape(PLATFORM_NAMES.get(p, p))}</label>' for p in platforms)
+
+
 def _review(conn, settings: Settings) -> str:
     """Clips waiting for approval, each with a playable preview."""
     waiting = pipeline.awaiting_review(conn)
@@ -236,14 +244,14 @@ def _review(conn, settings: Settings) -> str:
         cards.append(
             f'<div class="card"><b>{e(c["title"])}</b>'
             f'<div class="muted">{e(names.get(c["campaign_id"], c["campaign_id"] or "archive"))} &middot; {c["seconds"]:.0f}s &middot; AI score '
-            f'{e(str(c["ai_score"] or "?"))}/10 &middot; posts to '
-            f'{e(", ".join(PLATFORM_NAMES.get(p.strip(), p) for p in c["platforms"].split(",")))}</div>'
+            f'{e(str(c["ai_score"] or "?"))}/10</div>'
             + (f'<div>On-screen hook: <b>{e(c["hook_text"])}</b></div>' if c.get("hook_text") else "")
             + f'<video controls playsinline preload="metadata" src="/media/{e(c["media_token"])}.mp4"></video>'
             f'<div class="desc">{e(c["description"])}</div>'
+            f'<form method="post" action="/review/approve" style="margin-top:8px"><input type="hidden" name="id" '
+            f'value="{c["id"]}"><input type="hidden" name="choose" value="1"><div class="checks"><b>Post to:</b> {_platform_checks(c["platforms"].split(", "))}</div>'
+            f'<div class="row" style="margin-top:8px"><button class="primary">Approve</button></div></form>'
             f'<div class="row" style="margin-top:8px">'
-            f'<form class="inline" method="post" action="/review/approve"><input type="hidden" name="id" '
-            f'value="{c["id"]}"><button class="primary">Approve</button></form>'
             f'<form class="inline" method="post" action="/review/reject"><input type="hidden" name="id" '
             f'value="{c["id"]}"><button>Reject</button></form></div></div>')
     approve_all = ('<form method="post" action="/review/approve-all" style="margin-top:10px"><button>Approve all '
@@ -414,6 +422,11 @@ def _settings(conn, settings: Settings) -> str:
     limit = pipeline.daily_clip_limit(conn, settings)
     return (
         _youtube_card(conn, settings) +
+        f'<div class="card"><b>Post new clips to:</b><form method="post" action="/settings/post-to">'
+        f'<div class="checks" style="margin-top:6px">{_platform_checks(list(PLATFORM_NAMES), pipeline.post_to(conn))}</div>'
+        f'<button style="margin-top:8px">Save</button></form>'
+        f'<div class="muted">Every new clip is made for each ticked account (if its campaign pays there). You can '
+        f'still untick an account on a single clip before approving it.</div></div>'
         f'<div class="card"><b>Posting:</b> {html.escape(modes)}<div class="muted">A platform switches to '
         f'automatic when its posting connection is added in Railway.</div></div>'
         f'<div class="card"><b>Review clips before posting:</b> '
@@ -740,9 +753,21 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     db.put(conn, "run_now", "1")
                 elif self.path == "/submitted":
                     pipeline.mark_submitted(conn, [p["id"] for p in pipeline.pending_submissions(conn)])
-                elif self.path in ("/review/approve", "/review/reject"):
-                    clip_id = int(self._form().get("id", ["0"])[0] or 0)
-                    (pipeline.approve if self.path.endswith("approve") else pipeline.reject)(conn, clip_id)
+                elif self.path == "/review/approve":
+                    form = self._form()
+                    clip_id = int(form.get("id", ["0"])[0] or 0)
+                    # Unticked boxes aren't sent, so "choose" marks a form that had them.
+                    chosen = form.get("platforms", []) if "choose" in form else None
+                    if chosen == []:
+                        return self._page(error="Tick at least one account to post to, or tap Reject.")
+                    pipeline.approve(conn, clip_id, chosen)
+                elif self.path == "/review/reject":
+                    pipeline.reject(conn, int(self._form().get("id", ["0"])[0] or 0))
+                elif self.path == "/settings/post-to":
+                    chosen = self._form().get("platforms", [])
+                    if not chosen:
+                        return self._page(error="Tick at least one account to post to.")
+                    pipeline.set_post_to(conn, chosen)
                 elif self.path in ("/manual/save", "/manual/skip"):
                     form = self._form()
                     post_id = int(form.get("id", ["0"])[0] or 0)

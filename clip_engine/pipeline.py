@@ -20,7 +20,7 @@ import anthropic
 from . import ai, campaigns, db, media, moments, policy, sources, strategy, trends
 from .config import Settings
 from .db import clips_today, posts_today
-from .platforms import PublishError, is_manual, next_slot
+from .platforms import ALL_PLATFORMS, PublishError, is_manual, next_slot
 from .youtube import YouTube
 
 log = logging.getLogger(__name__)
@@ -205,13 +205,27 @@ def auto_platforms(conn: sqlite3.Connection) -> set[str]:
     return set(filter(None, (db.get(conn, "auto_platforms") or "").split(",")))
 
 
-def approve(conn: sqlite3.Connection, clip_id: int) -> None:
-    """Approve a reviewed clip. Automatic platforms are queued (keeping the scheduled slot if it's
-    still ahead); phone-posted platforms move to "Ready to post"."""
+def post_to(conn: sqlite3.Connection) -> list[str]:
+    """Accounts new clips go to, as ticked under Settings (all of them until you change it)."""
+    saved = db.get(conn, "post_to")
+    chosen = ALL_PLATFORMS if saved is None else saved.split(",")
+    return [p for p in ALL_PLATFORMS if p in chosen]
+
+
+def set_post_to(conn: sqlite3.Connection, chosen: list[str]) -> None:
+    db.put(conn, "post_to", ",".join(p for p in ALL_PLATFORMS if p in chosen))
+
+
+def approve(conn: sqlite3.Connection, clip_id: int, only: list[str] | None = None) -> None:
+    """Approve a reviewed clip, on every platform it was made for or only those in `only` (the
+    rest are skipped). Automatic platforms are queued (keeping the scheduled slot if it's still
+    ahead); phone-posted platforms move to "Ready to post"."""
     auto = auto_platforms(conn)
     for post_id, platform in conn.execute("SELECT id, platform FROM posts WHERE clip_id = ? AND status = 'review'",
                                           (clip_id,)).fetchall():
-        if platform in auto:
+        if only is not None and platform not in only:
+            conn.execute("UPDATE posts SET status = 'skipped' WHERE id = ?", (post_id,))
+        elif platform in auto:
             conn.execute("UPDATE posts SET status = 'queued', scheduled_at = MAX(scheduled_at, datetime('now'))"
                          " WHERE id = ?", (post_id,))
         else:
@@ -297,9 +311,10 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
     key = hashlib.sha1(src.identifier.encode()).hexdigest()[:16]
     work = settings.work_dir / key
     out_dir = settings.data_dir / "clips"
-    platforms = [p for p in (campaign.platforms if campaign else publishers) if p in publishers]
+    chosen = post_to(conn)
+    platforms = [p for p in (campaign.platforms if campaign else publishers) if p in publishers and p in chosen]
     if not platforms:
-        log.warning("campaign %s pays on %s, none of which are connected", campaign.id, campaign.platforms)
+        log.warning("none of the platforms for this clip are ticked under Settings, Post new clips to")
         return 0
     conn.execute(
         "INSERT INTO sources (identifier, title, creator, license_url, source_url, topic) VALUES (?, ?, ?, ?, ?, ?)",

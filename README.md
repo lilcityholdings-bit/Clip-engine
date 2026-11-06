@@ -71,21 +71,18 @@ Whop has no API for submitting clips, so new post links go to `DIGEST_WEBHOOK_UR
 
 ## Review mode and gradual start
 
-- **Review mode** is on by default. New clips appear on the dashboard under "Waiting for your approval", with a video preview, the hook, the caption and the platforms. Nothing posts until you tap **Approve**. **Reject** deletes the clip. Turn review mode off under Settings once you trust the output.
+- **Review mode** is on by default. New clips appear on the dashboard under "Waiting for your approval", with a video preview, the hook, the caption and a tick box for each account. Untick any account you don't want that clip on, then tap **Approve**; nothing posts until you do.
+- **Post new clips to** (Settings) sets which accounts every new clip is made for. A campaign's own platform list still applies, so a clip only goes where the campaign pays and you've ticked. **Reject** deletes the clip. Turn review mode off under Settings once you trust the output.
 - **Gradual start** protects new accounts from looking like spam: up to 4 clips a day in the first week, then `MAX_CLIPS_PER_DAY` (6). It can be switched off under Settings.
 - Clip-making runs in the background, so scheduled posts go out on time even during a long transcription. A 10-minute video needs about 0.9 GB of memory and a few minutes of CPU.
 
 ## Keeping Railway costs down
 
-Railway bills memory and CPU by the minute, so the engine is built to sleep:
+Railway bills memory and CPU by the minute, so the always-on part is kept small:
 
-- **Sleep mode** (Railway's Serverless setting) is on. The service sleeps after 10 minutes with no outbound traffic and costs nothing while asleep. Opening the dashboard wakes it; the first page takes a few seconds.
-- A tiny **`wake-clip-engine`** cron service (Alpine, `wget` the `/health` page at 2 minutes past every hour) wakes it to post what's due, check views and make clips on schedule. It runs for a second each hour.
-- Clips are made in a **separate process** (`python -m clip_engine produce`), so Whisper's memory (up to 3 GB) is released when it finishes. The always-on part uses about 100 MB.
-- While clips are being made, the engine touches the network every 5 minutes so Railway doesn't put it to sleep mid-transcription.
+- Clips are made in a **separate process** (`python -m clip_engine produce`), so Whisper's memory (up to 3 GB) is released when it finishes. The always-on part (dashboard and scheduler) uses about 100 MB, down from about 800 MB.
 - Without `ANTHROPIC_API_KEY`, no clips are made at all, so nothing is downloaded or transcribed for nothing.
-
-Posts are scheduled on the hour, and the hourly wake publishes them. If you ever turn sleep mode off, the engine works the same, just always on.
+- Railway's sleep mode was tried in November 2026 and turned off: the hourly cron wake-up didn't reliably wake the service, which risked missed posts, and with the service idling at 100 MB it would have saved well under $1 a month. The engine still supports it (it keeps itself awake while making clips) if a reliable wake-up is added later.
 
 ## Dashboard
 
