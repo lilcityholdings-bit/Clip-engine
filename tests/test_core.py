@@ -151,7 +151,7 @@ def test_pick_clips_drops_weak_and_sorts_best_first():
                           title_style="number", count=5)
     assert [c["title"] for c in clips] == ["great", "good"]
     kwargs = client.beta.messages.create.call_args.kwargs
-    assert kwargs["model"] == "claude-opus-5" and kwargs["fallbacks"] == "default"
+    assert kwargs["model"] == "claude-opus-5-5" and kwargs["fallbacks"] == "default"
 
 
 def test_refusal_raises():

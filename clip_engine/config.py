@@ -6,7 +6,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Settings:
-    anthropic_model: str = "claude-opus-5"
+    anthropic_model: str = "claude-opus-5-5"
     youtube_client_id: str = field(default_factory=lambda: os.environ.get("YOUTUBE_CLIENT_ID", ""))
     youtube_client_secret: str = field(default_factory=lambda: os.environ.get("YOUTUBE_CLIENT_SECRET", ""))
     youtube_refresh_token: str = field(default_factory=lambda: os.environ.get("YOUTUBE_REFRESH_TOKEN", ""))

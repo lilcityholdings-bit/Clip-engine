@@ -3,7 +3,7 @@ import json
 
 import anthropic
 
-MODEL = "claude-opus-5"
+MODEL = "claude-opus-5-5"
 # Re-run a declined request on Anthropic's recommended fallback model.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
