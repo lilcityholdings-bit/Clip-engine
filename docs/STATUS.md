@@ -1,12 +1,12 @@
 # Clip Engine: status and handoff
 
-Last updated 2026-11-06. The plain-language state of the product, for the owner, a future buyer, and any Claude session that picks up the work (including the company "Command center" chat).
+Last updated 2026-11-10. The plain-language state of the product, for the owner, a future buyer, and any Claude session that picks up the work (including the company "Command center" chat).
 
 ## What it is
 
 An automated clipping business. Creators in paid clipping programs (for example Whop Content Rewards) pay per 1,000 views for short clips of their videos. Clip Engine finds the creator's newest videos, cuts the best moments into Shorts with word-by-word captions, writes titles, hashtags and #ad disclosure, posts or prepares them for YouTube, TikTok and Instagram, tracks views and estimated earnings, and learns which choices earn the most (Thompson sampling).
 
-- Code: github.com/lilcityholdings-bit/Clip-engine (branch `main`). Tests: `python -m pytest` (125 passing).
+- Code: github.com/lilcityholdings-bit/Clip-engine (branch `main`). Tests: `python -m pytest` (126 passing).
 - Hosting: Railway project `clip-engine`, service `clip-engine` (always on, about 100 MB idle), volume `clip-engine-data` at `/data`. See README, Keeping Railway costs down. A leftover `wake-clip-engine` cron service from a sleep-mode trial should be deleted.
 - Dashboard: https://clip-engine-production-f966.up.railway.app (password = Railway variable `DASHBOARD_PASSWORD`).
 - Setup, deploy and platform docs: `README.md`. Secrets and incident procedure: `SECURITY.md`. Accounts: `docs/ASSETS.md`.
@@ -14,19 +14,20 @@ An automated clipping business. Creators in paid clipping programs (for example 
 ## Where things stand
 
 Done
-- Engine built, tested and running on Railway. Review mode on (nothing posts without approval); gradual start (4 clips/day for the first week, then 6).
-- YouTube: Google Cloud project `clip-engine-512213`, OAuth app published. A test upload on 2026-10-21 was NOT forced private, so no Google audit is needed.
-- Platform-rule protections (Oct 2026): own-angle captions, no near-duplicate titles, max 5 specific hashtags, watermarked sources refused, #ad and branded-content labels.
-- Security after Railway's 2026-10-21 breach notice: Railway 2FA (passkey), old YouTube login revoked, Google client secret rotated (old one deleted; new one ends in `Ztac`), dashboard password lockout added. Variables redeployed 2026-10-30.
+- Engine built, tested (126 passing) and running on Railway, always on at about 80 MB idle. Review mode on (nothing posts without approval); gradual start (4 clips/day in week 1, then 6). Currently PAUSED on purpose until the first campaign is added.
+- YouTube: channel @littlecityclips connected, test upload passed (not forced private), automatic posting on. No Google audit needed.
+- Claude API: Anthropic organization "Little City Digital LLC" (Console), $25 monthly spend limit, key added in Railway as ANTHROPIC_API_KEY. Engine uses claude-opus-5-5.
+- Security after Railway's 2026-10-21 breach: rotated the Google client secret and dashboard password, cancelled and reconnected the YouTube login, Railway passkey 2FA. Disconnect-YouTube button and password lockout added.
+- Platform-rule protections, per-clip account tick boxes (and default accounts in Settings), phone alerts via a Discord webhook (code done, webhook not set up yet).
+- TikTok @littlecityclipz and an Instagram account created (professional/Creator), both under ceorob321@gmail.com; practice posts made on YouTube and TikTok.
 
 Open, in order
-0. Delete the unused `wake-clip-engine` service in Railway (sleep-mode trial; the deletion prompt timed out).
-1. Reconnect YouTube on the dashboard (Connect YouTube, then Test a YouTube upload, then Turn on automatic posting). Confirm `DASHBOARD_PASSWORD` was changed after the breach.
-2. Claude API key: console.anthropic.com under the company email and a company-named organization; buy $10-20 credit; set a monthly limit (~$25); add as Railway variable `ANTHROPIC_API_KEY`. Nothing is clipped until this exists.
-3. First campaign: owner joins a Whop clipping campaign and shares the link; check its rules (AI/automated editing allowed? which platforms pay? required tags?) and add it with Add a campaign. Use the creator's YouTube channel as the source, never TikTok/Instagram links.
-4. Make clips now, approve the first clips, paste the post links into Whop daily.
-5. Instagram automatic posting: professional account, Meta developer app, the account added as an Instagram Tester, token and user ID into Railway (`INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_USER_ID`). The account was created in the app (Florida blocks web sign-up); confirm it uses the company email.
-6. TikTok: post from the phone (dashboard Ready to post). TikTok's Direct Post rules require per-post user choices and only allow private posts until audited, and internal tools for your own accounts aren't an intended use, so automatic TikTok posting is not planned. Later option: apply for the "send to drafts" (video.upload) scope.
+1. Join 1-3 clipping campaigns on Content Rewards (contentrewards.com, Whop's clipping product), pay on YouTube Shorts and TikTok, long talking source videos on YouTube, no ban on AI-assisted editing. Add each with Add a campaign (creator's YouTube channel as the source, never TikTok/Instagram links).
+2. Tap Resume, then Make clips now; approve the first clips. YouTube posts itself; TikTok is posted by hand from Ready to post.
+3. Discord alerts: create a company Discord server and webhook, add DIGEST_WEBHOOK_URL in Railway.
+4. Warm up the accounts (daily light use, a few original posts).
+5. Instagram automatic posting (Meta developer app, Instagram Tester, token; paused, optional). TikTok stays manual: TikTok's Direct Post rules don't allow unattended posting.
+6. Fix the YouTube channel name typo ("Little city cips" to "Little City Clips") on 2026-11-20; replace the profile picture with an original logo.
 
 ## Costs (estimates)
 
