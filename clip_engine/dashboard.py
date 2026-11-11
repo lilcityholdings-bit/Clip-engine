@@ -28,13 +28,14 @@ import re
 import secrets
 import threading
 import time
+from pathlib import Path
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from . import campaigns, db, pipeline, strategy, youtube
+from . import campaigns, db, manual, pipeline, policy, strategy, youtube
 from .config import Settings
 
 log = logging.getLogger(__name__)
@@ -120,6 +121,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 </div></section>
 <section><h2>Links to submit</h2>{pending}</section>
 <section id="campaigns"><h2>Campaigns</h2>{campaigns}{campaign_form}</section>
+{own_video}
 <section><h2>Trending now</h2>{trending}</section>
 <section><h2>Earnings by campaign</h2>{earnings}</section>
 <section><h2>What's working (higher score = more views and earnings)</h2>{strategy}</section>
@@ -183,6 +185,62 @@ def _campaign_rows(settings: Settings) -> str:
                      f'{e(", ".join(PLATFORM_NAMES.get(p, p) for p in c.platforms))}</div>'
                      f'<div class="row" style="margin-top:8px">{" ".join(actions)}</div></div>')
     return "".join(cards) or '<p class="muted">No campaigns yet. Add the first one below.</p>'
+
+
+UPLOAD_JS = """<script>
+function sendVideo(form, btn) {
+  const file = form.file.files[0];
+  if (!file) { alert('Choose a video first.'); return false; }
+  const q = new URLSearchParams({campaign: form.campaign.value, creator: form.creator.value,
+                                 title: form.title.value, name: file.name});
+  const status = form.querySelector('.status');
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/manual-video/upload?' + q.toString());
+  xhr.upload.onprogress = e => { if (e.lengthComputable) status.textContent = 'Uploading ' + Math.round(100 * e.loaded / e.total) + '%'; };
+  xhr.onload = () => {
+    let reply = {};
+    try { reply = JSON.parse(xhr.responseText); } catch (err) {}
+    location.href = '/?' + (xhr.status === 200 ? 'notice=' : 'error=') + encodeURIComponent(reply.message || 'Upload failed (' + xhr.status + ').');
+  };
+  xhr.onerror = () => { status.textContent = 'Upload failed. Check your connection and try again.'; btn.disabled = false; };
+  btn.disabled = true; status.textContent = 'Uploading 0%';
+  xhr.send(file);
+  return false;
+}
+</script>"""
+
+
+def _own_video(conn, settings: Settings) -> str:
+    """Hand the engine a video yourself: a file from your phone or a link, for campaigns that give you a download."""
+    live = campaigns.live(campaigns.load(settings.data_dir))
+    if not live:
+        return ""
+    e = html.escape
+    options = "".join(f'<option value="{e(c.id)}">{e(c.name)}</option>' for c in live)
+    waiting = manual.queue(conn)
+    queue_html = ""
+    if waiting:
+        queue_html = ('<div class="muted" style="margin:8px 0">Waiting to be clipped: '
+                      + "; ".join(e(w.get("title") or w["ref"][-40:]) for w in waiting) + '</div>')
+    common = (f'<label>Campaign</label><select name="campaign" style="width:100%;font:inherit;padding:9px">{options}</select>'
+              '<label>Creator\'s name <small>(credited in the caption; optional)</small></label>'
+              '<input type="text" name="creator">'
+              '<label>Title <small>(for your own reference; optional)</small></label><input type="text" name="title">')
+    return (
+        '<section id="own-video"><h2>Add your own video</h2>'
+        '<p class="muted">Some campaigns give you a video to download instead of a channel to watch. Upload it here, '
+        'or paste its link, and the engine clips it before anything else. The next time clips are made it is used '
+        '(tap Resume first if the engine is paused, then Make clips now).</p>' + queue_html +
+        f'<details><summary>Upload a video from this phone</summary>'
+        f'<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">{common}'
+        f'<label>Video file <small>(up to {manual.MAX_UPLOAD_MB} MB)</small></label>'
+        f'<input type="file" name="file" accept="video/*"><div class="muted status" style="margin:6px 0"></div>'
+        f'<button class="primary" type="submit">Upload</button></form></details>'
+        f'<details style="margin-top:10px"><summary>Paste a link instead</summary>'
+        f'<form method="post" action="/manual-video/link">{common}'
+        f'<label>Video link</label><input type="url" name="url" placeholder="https://">'
+        f'<button class="primary" style="margin-top:10px">Add video</button></form></details>'
+        + UPLOAD_JS + '</section>')
 
 
 def _campaign_form(values: dict | None, editing: bool, open_form: bool) -> str:
@@ -488,6 +546,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
         ready=_ready(conn, settings),
         settings_html=_settings(conn, settings),
         campaigns=_campaign_rows(settings),
+        own_video=_own_video(conn, settings),
         campaign_form=_campaign_form(form_values, editing=bool(form_values and form_values.get("id")),
                                      open_form=bool(form_values) or not campaigns.load(settings.data_dir)),
         state="paused" if paused else "running", state_class="bad" if paused else "good",
@@ -747,6 +806,8 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                 return self._send(403, b"forbidden", "text/plain")
             if self.path.startswith("/campaigns/"):
                 return self._campaign_action()
+            if self.path.startswith("/manual-video/upload"):
+                return self._upload_video()
             conn = db.connect(settings.db_path)
             try:
                 if self.path == "/pause":
@@ -767,6 +828,8 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     pipeline.approve(conn, clip_id, chosen)
                 elif self.path == "/review/reject":
                     pipeline.reject(conn, int(self._form().get("id", ["0"])[0] or 0))
+                elif self.path == "/manual-video/link":
+                    return self._add_video_link(conn)
                 elif self.path == "/settings/post-to":
                     chosen = self._form().get("platforms", [])
                     if not chosen:
@@ -803,6 +866,56 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
             finally:
                 conn.close()
             self._redirect("/")
+
+        def _live_campaign(self, campaign_id: str):
+            return campaigns.by_id(campaigns.live(campaigns.load(settings.data_dir))).get(campaign_id)
+
+        def _add_video_link(self, conn) -> None:
+            form = {k: v[0] for k, v in self._form().items()}
+            try:
+                if self._live_campaign(form.get("campaign", "")) is None:
+                    raise manual.UploadError("Pick one of your live campaigns.")
+                url = manual.clean_link(form.get("url", ""))
+                if policy.watermarked(url):
+                    raise manual.UploadError("TikTok, Instagram and Facebook videos carry the app's watermark. "
+                                             "Use the original file or a YouTube link.")
+            except manual.UploadError as exc:
+                return self._page(error=str(exc))
+            manual.add(conn, {"kind": "url", "ref": url, "campaign_id": form["campaign"],
+                              "creator": manual.clean_text(form.get("creator", "")),
+                              "title": manual.clean_text(form.get("title", ""))})
+            db.put(conn, "run_now", "1")
+            return self._redirect("/?" + urlencode({"notice": "Video added. It will be clipped the next time clips "
+                                                              "are made. Tap Resume if the engine is paused."}))
+
+        def _upload_video(self) -> None:
+            """The video arrives as the raw request body, so a big file streams to disk, not memory."""
+            query = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+
+            def reply(code: int, message: str) -> None:
+                self._send(code, json.dumps({"message": message}).encode(), "application/json")
+                # an error reply sent before the body was read: don't let the leftover bytes be misread as a new request
+                self.close_connection = code != 200
+
+            try:
+                if self._live_campaign(query.get("campaign", "")) is None:
+                    raise manual.UploadError("Pick one of your live campaigns.")
+                length = int(self.headers.get("Content-Length") or 0)
+                path = manual.save_upload(self.rfile, length, query.get("name", ""), settings.data_dir)
+            except manual.UploadError as exc:
+                return reply(400, str(exc))
+            except Exception:
+                log.exception("video upload failed")
+                return reply(500, "The upload failed. Try again.")
+            conn = db.connect(settings.db_path)
+            try:
+                manual.add(conn, {"kind": "file", "ref": str(path), "campaign_id": query["campaign"],
+                                  "creator": manual.clean_text(query.get("creator", "")),
+                                  "title": manual.clean_text(query.get("title", "")) or Path(query["name"]).stem[:60]})
+                db.put(conn, "run_now", "1")
+            finally:
+                conn.close()
+            reply(200, "Video uploaded. It will be clipped the next time clips are made. Tap Resume if the engine is paused.")
 
         def _campaign_action(self) -> None:
             raw = self._form()

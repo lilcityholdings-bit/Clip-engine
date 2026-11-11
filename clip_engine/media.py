@@ -142,6 +142,14 @@ def captions_ass(words: list[dict], start: float, end: float, fmt: str, hook: st
     return header + "\n".join(lines) + "\n"
 
 
+def duration(video: Path) -> float:
+    """Length of a video file in seconds."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(video)],
+        capture_output=True, text=True, check=True).stdout.strip()
+    return float(out)
+
+
 def _dimensions(video: Path) -> tuple[int, int]:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",

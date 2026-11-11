@@ -17,7 +17,7 @@ from pathlib import Path
 
 import anthropic
 
-from . import ai, campaigns, db, media, moments, policy, sources, strategy, trends
+from . import ai, campaigns, db, manual, media, moments, policy, sources, strategy, trends
 from .config import Settings
 from .db import clips_today, posts_today
 from .platforms import ALL_PLATFORMS, PublishError, is_manual, next_slot
@@ -34,6 +34,7 @@ class Job:
     src: sources.Source
     footer: str                 # appended to every clip's description
     campaign: campaigns.Campaign | None = None
+    item: dict | None = None    # the queued video you handed over, if this job came from one
 
 
 def attribution(src: sources.Source, fmt: str) -> str:
@@ -136,6 +137,41 @@ def campaign_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
             return Job(arms, src, campaigns.caption_lines(campaign, src, arms["format"]), campaign)
         log.info("campaign %s has no new videos", campaign.id)
         remaining.remove(campaign)
+    return None
+
+
+def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
+               music: list[str] | None = None) -> Job | None:
+    """The oldest video you handed over (uploaded or by link) whose campaign is still live."""
+    by_id = campaigns.by_id(live)
+    while (item := manual.pop(conn)) is not None:
+        campaign = by_id.get(item.get("campaign_id"))
+        if campaign is None:
+            log.info("dropping %s: its campaign isn't live", item)
+            manual.discard(item)
+            continue
+        try:
+            if item["kind"] == "file":
+                path = Path(item["ref"])
+                src = sources.Source(
+                    identifier=f"upload:{path.stem}", title=item.get("title") or path.stem,
+                    creator=item.get("creator") or campaign.name, license_url=campaign.program_url,
+                    video_url=str(path), duration=media.duration(path), page=campaign.program_url)
+            else:
+                if _seen(conn, item["ref"]) or policy.watermarked(item["ref"]):
+                    log.info("dropping %s: already clipped or watermarked", item["ref"])
+                    continue
+                src = campaigns.describe(campaign, item["ref"])
+                if item.get("creator"):
+                    src.creator = item["creator"]
+        except Exception:
+            log.exception("could not read the video you added: %s", item)
+            manual.discard(item)
+            continue
+        formats = [f for f in campaign.formats if f in strategy.FORMATS] or ["short"]
+        arms = strategy.plan(conn, [campaign.id], subject_dim="campaign", formats=formats,
+                             music=music if campaign.allow_music else None)
+        return Job(arms, src, campaigns.caption_lines(campaign, src, arms["format"]), campaign, item)
     return None
 
 
@@ -301,7 +337,8 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
     live = campaigns.live(campaigns.load(settings.data_dir))
     library = media.music_library(settings.data_dir)
     tracks = sorted(library)
-    job = campaign_job(conn, live, tracks) if live else archive_job(conn, claude, yt, tracks)
+    job = (manual_job(conn, live, tracks) or campaign_job(conn, live, tracks)) if live \
+        else archive_job(conn, claude, yt, tracks)
     if not job:
         log.warning("no usable source found")
         return 0
@@ -315,6 +352,8 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
     platforms = [p for p in (campaign.platforms if campaign else publishers) if p in publishers and p in chosen]
     if not platforms:
         log.warning("none of the platforms for this clip are ticked under Settings, Post new clips to")
+        if job.item:
+            manual.add(conn, job.item, front=True)  # keep your video for when an account is ticked
         return 0
     conn.execute(
         "INSERT INTO sources (identifier, title, creator, license_url, source_url, topic) VALUES (?, ?, ?, ?, ?, ?)",
@@ -326,7 +365,9 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
     slot = next_slot(int(arms["post_hour"])).strftime("%Y-%m-%d %H:%M:%S")
     queued = 0
     try:
-        if campaign:
+        if src.identifier.startswith("upload:"):
+            video = Path(src.video_url)  # a file you uploaded: already on the disk
+        elif campaign:
             video = campaigns.download(src.video_url, work / "source.mp4")
         else:
             video = media.download(src.video_url, work / "source.mp4")
@@ -388,6 +429,8 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
         conn.execute("UPDATE sources SET processed_at = datetime('now') WHERE identifier = ?", (src.identifier,))
         conn.commit()
         shutil.rmtree(work, ignore_errors=True)
+        if src.identifier.startswith("upload:"):
+            Path(src.video_url).unlink(missing_ok=True)  # the clips are made; free the disk
     return queued
 
 
