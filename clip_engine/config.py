@@ -20,6 +20,8 @@ class Settings:
     dashboard_password: str = field(default_factory=lambda: os.environ.get("DASHBOARD_PASSWORD", ""))
     port: int = field(default_factory=lambda: int(os.environ.get("PORT", "8080")))
     privacy_status: str = field(default_factory=lambda: os.environ.get("PRIVACY_STATUS", "public"))
+    # With no live campaign, clip public-domain films instead of doing nothing. Off unless ARCHIVE_MODE=1.
+    archive_mode: bool = field(default_factory=lambda: os.environ.get("ARCHIVE_MODE") == "1")
     trend_region: str = field(default_factory=lambda: os.environ.get("TREND_REGION", "US"))
     score_after_hours: int = field(default_factory=lambda: int(os.environ.get("SCORE_AFTER_HOURS", "48")))
     whisper_model: str = field(default_factory=lambda: os.environ.get("WHISPER_MODEL", "base"))

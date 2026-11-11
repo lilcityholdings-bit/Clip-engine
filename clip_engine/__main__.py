@@ -89,6 +89,14 @@ def keep_awake() -> None:
         pass
 
 
+def wait_for_next_tick(conn, seconds: int = TICK_MINUTES * 60, step: int = 10, sleep=time.sleep) -> None:
+    """Sleep until the next 5-minute tick, but wake within seconds when Make clips now is tapped."""
+    for _ in range(seconds // step):
+        sleep(step)
+        if db.get(conn, "run_now") == "1" and db.get(conn, "paused") != "1" and not producing():
+            return
+
+
 def tick(conn, settings: Settings, pubs) -> None:
     """One pass of the scheduler. Every step is isolated so one failure doesn't stop the rest."""
     if db.get(conn, "paused") == "1":
@@ -99,10 +107,16 @@ def tick(conn, settings: Settings, pubs) -> None:
         steps += [("score", lambda: pipeline.score(conn, settings, pubs)),
                   ("views", lambda: pipeline.refresh_views(conn, pubs)),
                   ("digest", lambda: pipeline.send_digest(conn, settings.digest_webhook_url))]
-    if can_produce() and not producing() and (
-            db.get(conn, "run_now") == "1" or due(conn, "last_produce", PRODUCE_EVERY_HOURS)):
-        db.put(conn, "run_now", "0")
-        start_producer()
+    if can_produce() and not producing():
+        asked = db.get(conn, "run_now") == "1"
+        if asked or due(conn, "last_produce", PRODUCE_EVERY_HOURS):
+            db.put(conn, "run_now", "0")
+            reason = pipeline.nothing_to_do(conn, settings)
+            if not reason:
+                pipeline.set_status(conn, "running", "Making clips now. This usually takes 5 to 20 minutes.")
+                start_producer()
+            elif asked:
+                pipeline.set_status(conn, "idle", reason)
     for name, fn in steps:
         try:
             fn()
@@ -135,11 +149,17 @@ def main(argv: list[str]) -> int:
     settings, yt, pubs = build_publishers(conn, base)
     if command == "produce":
         try:
-            pipeline.produce(conn, settings, anthropic.Anthropic(), yt, pubs, CLIPS_PER_CYCLE)
+            made = pipeline.produce(conn, settings, anthropic.Anthropic(), yt, pubs, CLIPS_PER_CYCLE)
         except Exception as exc:
             log.exception("produce failed; will retry next cycle")
+            pipeline.set_status(conn, "failed", f"Making clips failed and will be tried again: {exc}"[:300])
             pipeline.notify(settings.digest_webhook_url, f"clip-engine: produce failed and will retry: {exc!r}")
             return 1
+        if made:
+            pipeline.set_status(conn, "done", f"Made {made} new clip{'s' if made > 1 else ''}. Scroll up to review "
+                                              f"{'them' if made > 1 else 'it'}.")
+        else:
+            pipeline.set_status(conn, "idle", db.get(conn, "produce_note") or "No clips were made this time.")
     elif command == "publish":
         pipeline.publish_due(conn, settings, pubs)
     elif command == "score":
@@ -155,7 +175,7 @@ def main(argv: list[str]) -> int:
             tick(conn, settings, pubs)
             if producing():
                 keep_awake()
-            time.sleep(TICK_MINUTES * 60)
+            wait_for_next_tick(conn)
     else:
         print(__doc__)
         return 2

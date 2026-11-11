@@ -29,6 +29,13 @@ class PublishError(RuntimeError):
     pass
 
 
+def caption_for(clip: dict) -> str:
+    """Title then description, or just one of them when a campaign's approved caption is both."""
+    if clip["title"].strip() == clip["description"].strip():
+        return clip["title"][:2200]
+    return f"{clip['title']}\n\n{clip['description']}"[:2200]
+
+
 class YouTubePublisher:
     name = "youtube"
 
@@ -105,7 +112,7 @@ class TikTokPublisher:
     def publish(self, clip: dict, path: Path, public_url: str) -> tuple[str, str]:
         size = path.stat().st_size
         chunk_size, count = self.chunking(size)
-        caption = f"{clip['title']}\n\n{clip['description']}"[:2200]
+        caption = caption_for(clip)
         init = self._post("/v2/post/publish/video/init/", {
             "post_info": {
                 "title": caption,
@@ -192,7 +199,7 @@ class InstagramPublisher:
     def publish(self, clip: dict, path: Path, public_url: str) -> tuple[str, str]:
         if not public_url:
             raise PublishError("Instagram needs PUBLIC_BASE_URL so it can fetch the video")
-        caption = f"{clip['title']}\n\n{clip['description']}"[:2200]
+        caption = caption_for(clip)
         container = self._call("POST", f"{self.user_id}/media", media_type="REELS", video_url=public_url,
                                caption=caption, share_to_feed="true")["id"]
         for _ in range(60):

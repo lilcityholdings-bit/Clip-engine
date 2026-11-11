@@ -285,9 +285,9 @@ def test_silent_footage_is_cut_by_picture_when_captions_are_approved(tmp_path, m
     monkeypatch.setattr(media, "render", lambda video_path, out, start, end, fmt, captions, **k: (
         rendered.append((start, end, captions)), out.parent.mkdir(parents=True, exist_ok=True), out.write_bytes(b"c"), out)[3])
     pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
-    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 2
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 4  # all of today's 4
     assert not claude.beta.messages.create.called  # no Claude call, so no cost
-    assert len(rendered) == 2 and all(10 <= b - a <= 58 for a, b, _ in rendered)
+    assert len(rendered) == 4 and all(10 <= b - a <= 58 for a, b, _ in rendered)
     assert all("Dialogue" not in text for _, _, text in rendered)  # no burned-in words, no hook text
     rows = conn.execute("SELECT title, description FROM clips").fetchall()
     assert all(r["title"] == caps[0] == r["description"] for r in rows)
@@ -301,3 +301,47 @@ def test_silent_footage_without_approved_captions_is_skipped(tmp_path, monkeypat
     monkeypatch.setattr(media, "has_audio", lambda v: False)
     pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
     assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 0
+
+
+def test_a_failed_run_keeps_your_upload_for_another_try(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["A good clip"])
+    video = tmp_path / "uploads" / "ep1.mp4"
+    monkeypatch.setattr(media, "render", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ffmpeg died")))
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    for attempt in (1, 2):
+        with pytest.raises(RuntimeError):
+            pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2)
+        assert video.exists() and manual.queue(conn)[0]["attempts"] == attempt
+    with pytest.raises(RuntimeError):
+        pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2)
+    assert not video.exists() and manual.queue(conn) == []  # third failure: given up
+
+
+def test_an_uploaded_video_gets_all_of_todays_clips(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["One thing", "Another topic", "Third subject"])
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 3  # not capped at 2
+
+
+def test_silent_upload_without_captions_explains_itself(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["unused"])
+    monkeypatch.setattr(media, "has_audio", lambda v: False)
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 0
+    assert "approved captions" in db.get(conn, "produce_note")
+
+
+def test_caption_is_not_doubled_when_the_campaign_dictates_it():
+    from clip_engine import platforms
+    cap = "first look at the Ring Drone @Ring #ad"
+    assert platforms.caption_for({"title": cap, "description": cap}) == cap
+    assert platforms.caption_for({"title": "T", "description": "D"}) == "T\n\nD"

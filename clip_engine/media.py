@@ -53,6 +53,9 @@ def transcribe(video: Path, model_size: str,
         samples = _read_wav(audio)
         raw_segments, _ = model.transcribe(str(audio), word_timestamps=True, vad_filter=True)
         for seg in raw_segments:
+            # Over music or noise Whisper invents words. Its own confidence numbers flag those segments.
+            if getattr(seg, "no_speech_prob", 0.0) > 0.6 and getattr(seg, "avg_logprob", 0.0) < -1.0:
+                continue
             chunk = samples[int(seg.start * 16000):int(seg.end * 16000)]
             rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2))) if len(chunk) else 0.0
             segments.append({"start": float(seg.start + w_start), "end": float(seg.end + w_start), "text": seg.text,

@@ -27,6 +27,7 @@ def test_production_runs_in_its_own_process_and_posting_continues(tmp_path, monk
     published, launched = [], []
     _quiet(monkeypatch, published)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setattr(pipeline, "nothing_to_do", lambda c, s: "")
 
     def popen(cmd, **kw):
         launched.append(cmd[1:])
@@ -81,3 +82,60 @@ def test_hourly_wake_a_little_early_still_counts(tmp_path, monkeypatch):
     assert main_mod.due(conn, "last_score", 1)
     now[0] += 5 * 60  # but a tick a few minutes later doesn't run it twice
     assert not main_mod.due(conn, "last_score", 1)
+
+
+def test_nothing_is_started_when_there_is_nothing_to_clip(tmp_path, monkeypatch):
+    settings = Settings(data_dir=tmp_path)
+    conn = db.connect(settings.db_path)
+    _quiet(monkeypatch, [])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.delenv("CAMPAIGNS_JSON", raising=False)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("started")))
+    main_mod.tick(conn, settings, {"youtube": object()})  # the 3-hourly run: silent
+    assert pipeline.status(conn) == {}
+    db.put(conn, "run_now", "1")
+    main_mod.tick(conn, settings, {"youtube": object()})  # asked for by the owner: say why
+    assert "Add a campaign first" in pipeline.status(conn)["text"] and db.get(conn, "run_now") == "0"
+
+
+def test_nothing_to_do_reasons(tmp_path, monkeypatch):
+    from clip_engine import campaigns, manual
+    monkeypatch.delenv("CAMPAIGNS_JSON", raising=False)
+    settings = Settings(data_dir=tmp_path)
+    conn = db.connect(settings.db_path)
+    assert "Add a campaign" in pipeline.nothing_to_do(conn, settings)
+    assert pipeline.nothing_to_do(conn, Settings(data_dir=tmp_path, archive_mode=True)) == ""
+    campaigns.save(tmp_path, campaigns.Campaign(id="r", name="R", program_url="https://w", rate_per_1k_views=1, sources=[]))
+    assert "Upload a video" in pipeline.nothing_to_do(conn, settings)
+    manual.add(conn, {"kind": "file", "ref": "/x.mp4", "campaign_id": "r"})
+    assert pipeline.nothing_to_do(conn, settings) == ""
+    monkeypatch.setattr(pipeline, "clips_today", lambda c: 99)
+    assert "limit" in pipeline.nothing_to_do(conn, settings)
+
+
+def test_make_clips_now_wakes_the_scheduler_early(tmp_path, monkeypatch):
+    conn = db.connect(tmp_path / "w.db")
+    monkeypatch.setattr(main_mod, "_producer", None)
+    naps = []
+
+    def nap(seconds):
+        naps.append(seconds)
+        if len(naps) == 3:
+            db.put(conn, "run_now", "1")
+    main_mod.wait_for_next_tick(conn, sleep=nap)
+    assert len(naps) == 3  # woke 30 seconds in, not after 5 minutes
+    naps.clear()
+    db.put(conn, "paused", "1")
+    main_mod.wait_for_next_tick(conn, seconds=50, sleep=naps.append)
+    assert len(naps) == 5  # paused: waits the whole time
+
+
+def test_stale_running_status_reads_as_interrupted(tmp_path):
+    import json
+    from datetime import datetime, timedelta
+    conn = db.connect(tmp_path / "s.db")
+    pipeline.set_status(conn, "running", "Making clips now.")
+    assert pipeline.status(conn)["state"] == "running"
+    old = (datetime.utcnow() - timedelta(hours=2)).isoformat()
+    db.put(conn, "produce_status", json.dumps({"state": "running", "text": "x", "at": old}))
+    assert pipeline.status(conn)["state"] == "failed" and "interrupted" in pipeline.status(conn)["text"]

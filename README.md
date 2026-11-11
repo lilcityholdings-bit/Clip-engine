@@ -65,7 +65,7 @@ Each clip records the choices behind it: **campaign or topic, format, clip lengt
 ## Source modes
 
 - **Campaign mode** (the main one): clips the newest videos of creators who pay per view through clipping programs such as Whop Content Rewards. Joining a program gives you the right to repost that creator's content. You add each campaign to `CAMPAIGNS_JSON`; the format is at the top of `clip_engine/campaigns.py`. Every post credits the creator, includes the campaign's required tags and carries a paid-promotion disclosure: **#ad** in the caption, plus TikTok's branded-content label. The FTC requires this disclosure.
-- **Archive mode** (used when no campaigns are set up): clips public-domain films from curated Internet Archive collections (Prelinger, feature films, US government films, NASA). Archive licenses elsewhere are set by uploaders and often wrong, so those aren't used. Accepted licenses are public domain, CC0, CC BY and CC BY-SA.
+- **Archive mode** (off by default; set `ARCHIVE_MODE=1` to use it when no campaign is live): clips public-domain films from curated Internet Archive collections (Prelinger, feature films, US government films, NASA). Archive licenses elsewhere are set by uploaders and often wrong, so those aren't used. Accepted licenses are public domain, CC0, CC BY and CC BY-SA.
 
 Whop has no API for submitting clips, so new post links go to `DIGEST_WEBHOOK_URL` (a Discord or Slack channel) and appear on the dashboard, ready to paste. Programs that track views by connecting your accounts need no submission step.
 
@@ -90,12 +90,18 @@ Some campaigns require one of their own captions, word for word, and forbid othe
 
 Set `DIGEST_WEBHOOK_URL` to a Discord channel webhook (free; the Discord app gives push notifications). Within 5 minutes the engine messages you once when new clips are waiting for approval, and once when a clip you post by hand (TikTok, or Instagram until it's connected) reaches its posting time. Once an hour it also sends the new post links to paste into Whop. Use a Discord server owned by the company so it can be handed over.
 
+## Making clips, and knowing what happened
+
+**Make clips now** starts a run within about 10 seconds (and resumes the engine if it was paused). A status line under the button says what is happening: making clips, how many were made, or the plain reason none were (no new video, today's limit reached, no speech and no approved captions). While a run is going the page refreshes itself so new clips appear at the top. A video you upload gets all of today's remaining clips, and if a run fails part-way your upload is kept and retried (up to 3 times).
+
 ## Keeping Railway costs down
 
 Railway bills memory and CPU by the minute, so the always-on part is kept small:
 
 - Clips are made in a **separate process** (`python -m clip_engine produce`), so Whisper's memory (up to 3 GB) is released when it finishes. The always-on part (dashboard and scheduler) uses about 100 MB, down from about 800 MB.
 - Without `ANTHROPIC_API_KEY`, no clips are made at all, so nothing is downloaded or transcribed for nothing.
+- The heavy clip-making process is only started when there is something to clip: a video you added, or a live campaign with a channel to watch, and room under today's limit. With no campaign the engine idles instead of clipping archive films.
+- Videos with no audio track skip transcription, and speechless footage is cut without a Claude call.
 - Railway's sleep mode was tried in November 2026 and turned off: the hourly cron wake-up didn't reliably wake the service, which risked missed posts, and with the service idling at 100 MB it would have saved well under $1 a month. The engine still supports it (it keeps itself awake while making clips) if a reliable wake-up is added later.
 
 ## Dashboard

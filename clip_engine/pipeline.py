@@ -329,25 +329,73 @@ def snap_to_words(clip: dict, words: list[dict]) -> dict:
     return clip
 
 
+MAX_UPLOAD_ATTEMPTS = 3
+STALE_STATUS_MINUTES = 45
+
+
+def set_status(conn: sqlite3.Connection, state: str, text: str) -> None:
+    """What clip-making is doing, for the dashboard: state is running, done, failed or idle."""
+    db.put(conn, "produce_status", json.dumps({"state": state, "text": text, "at": datetime.utcnow().isoformat()}))
+
+
+def status(conn: sqlite3.Connection) -> dict:
+    """The latest status. A "running" that is too old means the process was cut off (e.g. by a deploy)."""
+    saved = json.loads(db.get(conn, "produce_status") or "{}")
+    if saved.get("state") == "running" and \
+            datetime.utcnow() - datetime.fromisoformat(saved["at"]) > timedelta(minutes=STALE_STATUS_MINUTES):
+        return {**saved, "state": "failed", "text": "Clip-making was interrupted. Tap Make clips now to try again."}
+    return saved
+
+
+def _note(conn: sqlite3.Connection, text: str) -> None:
+    """Why the last run made no clips, in words for the owner."""
+    log.info(text)
+    db.put(conn, "produce_note", text)
+
+
+def nothing_to_do(conn: sqlite3.Connection, settings: Settings) -> str:
+    """Why there is no point starting a clip run right now ("" if there is something to clip).
+    Checked before the heavy process is started, so idle hours cost nothing."""
+    limit = daily_clip_limit(conn, settings)
+    if clips_today(conn) >= limit:
+        return f"Today's limit of {limit} clips is reached. More can be made tomorrow."
+    if manual.queue(conn):
+        return ""
+    live = campaigns.live(campaigns.load(settings.data_dir))
+    if not live:
+        return "" if settings.archive_mode else "Add a campaign first, then tap Make clips now."
+    if not any(c.sources for c in live):
+        return ("Nothing to clip yet. Upload a video under Add your own video, or add the creator's channel "
+                "link to the campaign.")
+    return ""
+
+
 def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anthropic, yt: YouTube | None,
             publishers: dict, max_clips: int) -> int:
     """Find a source, cut the best clips and queue them on every enabled platform. Returns clips queued."""
+    db.put(conn, "produce_note", "")
     if not publishers:
-        log.warning("no publishing platform is configured")
+        _note(conn, "No posting account is set up.")
         return 0
-    remaining = min(max_clips, daily_clip_limit(conn, settings) - clips_today(conn))
+    left_today = daily_clip_limit(conn, settings) - clips_today(conn)
+    remaining = min(max_clips, left_today)
     if remaining <= 0:
-        log.info("daily clip limit reached")
+        _note(conn, "Today's clip limit is reached. More can be made tomorrow.")
         return 0
 
     live = campaigns.live(campaigns.load(settings.data_dir))
     library = media.music_library(settings.data_dir)
     tracks = sorted(library)
-    job = (manual_job(conn, live, tracks) or campaign_job(conn, live, tracks)) if live \
-        else archive_job(conn, claude, yt, tracks)
+    if live:
+        job = manual_job(conn, live, tracks) or campaign_job(conn, live, tracks)
+    else:
+        job = archive_job(conn, claude, yt, tracks) if settings.archive_mode else None
     if not job:
-        log.warning("no usable source found")
+        _note(conn, "No new video to clip. Upload one under Add your own video, or wait for the creator's next "
+                    "upload." if live else "Add a campaign first.")
         return 0
+    if job.item:
+        remaining = left_today  # a video you handed over is used once, so take all of today's clips from it
     src, arms, campaign = job.src, job.arms, job.campaign
     log.info("plan %s using %s", arms, src.identifier)
 
@@ -357,12 +405,13 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
     chosen = post_to(conn)
     platforms = [p for p in (campaign.platforms if campaign else publishers) if p in publishers and p in chosen]
     if not platforms:
-        log.warning("none of the platforms for this clip are ticked under Settings, Post new clips to")
+        _note(conn, "None of this campaign's platforms are ticked under Settings, Post new clips to.")
         if job.item:
             manual.add(conn, job.item, front=True)  # keep your video for when an account is ticked
         return 0
     conn.execute(
-        "INSERT INTO sources (identifier, title, creator, license_url, source_url, topic) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO sources (identifier, title, creator, license_url, source_url, topic)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
         (src.identifier, src.title, src.creator, src.license_url, src.page_url,
          arms.get("topic") or arms.get("campaign")),
     )
@@ -370,6 +419,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
 
     slot = next_slot(int(arms["post_hour"])).strftime("%Y-%m-%d %H:%M:%S")
     queued = 0
+    finished = False
     try:
         if src.identifier.startswith("upload:"):
             video = Path(src.video_url)  # a file you uploaded: already on the disk
@@ -403,7 +453,9 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                       "hashtags": [], "score": None} for a, b in spans]
             log.info("no speech in %s; cutting %d clips by shot changes", src.identifier, len(clips))
         else:
-            log.warning("no speech found in %s", src.identifier)
+            _note(conn, f'No speech was found in "{src.title}", so there was nothing to pick clips from. For '
+                        "footage without talking, add the campaign's approved captions and upload it again.")
+            finished = True
             return 0
         for i, clip in enumerate(clips):
             if not visual and not moments.same_window(clip, segments):
@@ -448,12 +500,19 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             conn.commit()
             queued += 1
             log.info("queued clip %s for %s at %s: %s", cur.lastrowid, platforms, slot, clip["title"])
+        finished = True
+        if not queued:
+            _note(conn, f'No moment in "{src.title}" was strong enough to post. Try a different video.')
     finally:
         conn.execute("UPDATE sources SET processed_at = datetime('now') WHERE identifier = ?", (src.identifier,))
         conn.commit()
         shutil.rmtree(work, ignore_errors=True)
-        if src.identifier.startswith("upload:"):
-            Path(src.video_url).unlink(missing_ok=True)  # the clips are made; free the disk
+        if job.item and job.item.get("kind") == "file":
+            attempts = job.item.get("attempts", 0) + 1
+            if finished or queued or attempts >= MAX_UPLOAD_ATTEMPTS:
+                Path(src.video_url).unlink(missing_ok=True)  # used (or given up on): free the disk
+            else:  # it failed part-way: keep your upload and try it again on the next run
+                manual.add(conn, {**job.item, "attempts": attempts}, front=True)
     return queued
 
 

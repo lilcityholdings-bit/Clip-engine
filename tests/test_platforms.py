@@ -160,15 +160,39 @@ def test_media_is_public_but_only_by_token(server):
     assert _get(base + "/health").read() == b"ok"
 
 
-def test_pause_and_run_buttons(server):
+def test_pause_and_run_buttons(server, tmp_path, monkeypatch):
     base, conn = server
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    monkeypatch.delenv("CAMPAIGNS_JSON", raising=False)
     _get(base + "/pause", "s3cret", data=b"")
-    assert db.get(db.connect(conn.execute("PRAGMA database_list").fetchone()[2]), "paused") == "1"
-    _get(base + "/run", "s3cret", data=b"")
-    fresh = db.connect(conn.execute("PRAGMA database_list").fetchone()[2])
-    assert db.get(fresh, "run_now") == "1"
+    assert db.get(db.connect(path), "paused") == "1"
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert "Claude API key first" in _get(base + "/run", "s3cret", data=b"").read().decode()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    assert "Add a campaign first" in _get(base + "/run", "s3cret", data=b"").read().decode()
+    assert db.get(db.connect(path), "run_now") != "1" and db.get(db.connect(path), "paused") == "1"
+
+    campaigns.save(tmp_path, campaigns.Campaign(id="p", name="P", program_url="https://w", rate_per_1k_views=1,
+                                                sources=["https://youtube.com/@p"]))
+    page = _get(base + "/run", "s3cret", data=b"").read().decode()
+    fresh = db.connect(path)
+    assert db.get(fresh, "run_now") == "1" and db.get(fresh, "paused") == "0"  # asking for clips resumes
+    assert "Resumed. Making clips now" in page and 'id="status"' in page and "location.replace" in page
     with pytest.raises(urllib.error.HTTPError):
         _get(base + "/resume", None, data=b"")
+
+
+def test_status_line_and_paid_promotion_reminder(server):
+    base, conn = server
+    pipeline.set_status(conn, "idle", "No new video to clip.")
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "No new video to clip." in page and "location.replace" not in page
+    conn.execute("UPDATE clips SET campaign_id = 'p' WHERE id = 1")
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at, url, posted_at)"
+                 " VALUES (1, 'youtube', 'posted', datetime('now'), 'https://youtu.be/x', datetime('now'))")
+    conn.commit()
+    assert "Includes paid promotion" in _get(base + "/", "s3cret").read().decode()
 
 
 def test_dashboard_disabled_without_password(tmp_path):

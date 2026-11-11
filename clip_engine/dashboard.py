@@ -118,7 +118,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 </div><div class="row" style="margin-top:12px">
 <form method="post" action="/{toggle}"><button class="primary">{toggle_label}</button></form>
 <form method="post" action="/run"><button>Make clips now</button></form>
-</div></section>
+</div>{status}</section>
 <section><h2>Links to submit</h2>{pending}</section>
 <section id="campaigns"><h2>Campaigns</h2>{campaigns}{campaign_form}</section>
 {own_video}
@@ -202,12 +202,35 @@ function sendVideo(form, btn) {
     try { reply = JSON.parse(xhr.responseText); } catch (err) {}
     location.href = '/?' + (xhr.status === 200 ? 'notice=' : 'error=') + encodeURIComponent(reply.message || 'Upload failed (' + xhr.status + ').');
   };
-  xhr.onerror = () => { status.textContent = 'Upload failed. Check your connection and try again.'; btn.disabled = false; };
-  btn.disabled = true; status.textContent = 'Uploading 0%';
+  xhr.onerror = () => { status.textContent = 'Upload failed. Check your connection and try again.'; btn.disabled = false; window.uploading = false; };
+  btn.disabled = true; window.uploading = true; status.textContent = 'Uploading 0%';
   xhr.send(file);
   return false;
 }
 </script>"""
+
+
+# While clips are being made, reload the page so new clips appear by themselves, but never while
+# the owner is typing, uploading or watching a preview.
+REFRESH_JS = """<script>
+setInterval(function () {
+  var el = document.activeElement, busy = el && ['INPUT', 'TEXTAREA', 'SELECT'].indexOf(el.tagName) >= 0;
+  var playing = Array.prototype.some.call(document.querySelectorAll('video'), function (v) { return !v.paused; });
+  if (!busy && !playing && !window.uploading) location.replace(location.pathname);
+}, 20000);
+</script>"""
+
+
+def _status(conn) -> str:
+    """One line under the buttons saying what clip-making is doing or why it made nothing."""
+    s = pipeline.status(conn)
+    if db.get(conn, "run_now") == "1" and db.get(conn, "paused") != "1":
+        s = {"state": "running", "text": "Starting to make clips. This usually takes 5 to 20 minutes."}
+    if not s:
+        return ""
+    css = {"running": "", "done": "good", "failed": "bad"}.get(s["state"], "muted")
+    return (f'<div id="status" class="{css}" style="margin-top:10px">{html.escape(s["text"])}</div>'
+            + (REFRESH_JS if s["state"] == "running" else ""))
 
 
 def _own_video(conn, settings: Settings) -> str:
@@ -229,8 +252,7 @@ def _own_video(conn, settings: Settings) -> str:
     return (
         '<section id="own-video"><h2>Add your own video</h2>'
         '<p class="muted">Some campaigns give you a video to download instead of a channel to watch. Upload it here, '
-        'or paste its link, and the engine clips it before anything else. The next time clips are made it is used '
-        '(tap Resume first if the engine is paused, then Make clips now).</p>' + queue_html +
+        'or paste its link, and the engine clips it before anything else. Then tap Make clips now.</p>' + queue_html +
         f'<details><summary>Upload a video from this phone</summary>'
         f'<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">{common}'
         f'<label>Video file <small>(up to {manual.MAX_UPLOAD_MB} MB)</small></label>'
@@ -518,6 +540,9 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
                           [[e(p["campaign_id"]), e(p["platform"]), _link(p["url"], p["url"])] for p in pending],
                           "Nothing waiting.")
     if pending:
+        if any(p["platform"] == "youtube" for p in pending):
+            pending_html += ('<p class="muted">Paid campaign on YouTube: open YouTube Studio, Content, the Short, '
+                             'then tick <b>Includes paid promotion</b>. The engine can\'t set that label.</p>')
         pending_html += '<form method="post" action="/submitted" style="margin-top:10px"><button>Mark all submitted</button></form>'
     clips = conn.execute(
         "SELECT c.id, c.title, c.created_at, c.ai_score, c.campaign_id,"
@@ -554,6 +579,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
         own_video=_own_video(conn, settings),
         campaign_form=_campaign_form(form_values, editing=bool(form_values and form_values.get("id")),
                                      open_form=bool(form_values) or not campaigns.load(settings.data_dir)),
+        status=_status(conn),
         state="paused" if paused else "running", state_class="bad" if paused else "good",
         earned=f"{sum(r['estimated_usd'] for r in earn):,.2f}", views=f"{totals['views']:,}",
         posted=totals["posted"] or 0, queued=totals["queued"] or 0,
@@ -820,7 +846,17 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                 elif self.path == "/resume":
                     db.put(conn, "paused", "0")
                 elif self.path == "/run":
+                    if not os.environ.get("ANTHROPIC_API_KEY"):
+                        return self._page(error="Add your Claude API key first (step 1 of Getting started).")
+                    reason = pipeline.nothing_to_do(conn, settings)
+                    if reason:
+                        return self._page(error=reason)
+                    was_paused = db.get(conn, "paused") == "1"
+                    db.put(conn, "paused", "0")  # asking for clips means run
                     db.put(conn, "run_now", "1")
+                    return self._redirect("/?" + urlencode({"notice": (
+                        "Resumed. " if was_paused else "") + "Making clips now. They appear at the top of this "
+                        "page in 5 to 20 minutes; you can leave and come back."}))
                 elif self.path == "/submitted":
                     pipeline.mark_submitted(conn, [p["id"] for p in pipeline.pending_submissions(conn)])
                 elif self.path == "/review/approve":
@@ -890,8 +926,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                               "creator": manual.clean_text(form.get("creator", "")),
                               "title": manual.clean_text(form.get("title", ""))})
             db.put(conn, "run_now", "1")
-            return self._redirect("/?" + urlencode({"notice": "Video added. It will be clipped the next time clips "
-                                                              "are made. Tap Resume if the engine is paused."}))
+            return self._redirect("/?" + urlencode({"notice": "Video added. Now tap Make clips now."}))
 
         def _upload_video(self) -> None:
             """The video arrives as the raw request body, so a big file streams to disk, not memory."""
@@ -920,7 +955,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                 db.put(conn, "run_now", "1")
             finally:
                 conn.close()
-            reply(200, "Video uploaded. It will be clipped the next time clips are made. Tap Resume if the engine is paused.")
+            reply(200, "Video uploaded. Now tap Make clips now.")
 
         def _campaign_action(self) -> None:
             raw = self._form()
@@ -935,7 +970,11 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     return self._page(error=str(exc), form_values=values)
                 existed = campaign.id in by_id
                 campaigns.save(settings.data_dir, campaign)
-                done = "updated." if existed else "added. Clips for it start on the next cycle."
+                done = "updated." if existed else "added."
+                if not campaign.sources:
+                    done += " Next: upload its video under Add your own video, just below the campaigns."
+                elif not existed:
+                    done += " Tap Make clips now to start."
                 return self._redirect("/?" + urlencode({"notice": f"Campaign {campaign.name} {done}"}))
             campaign = by_id.get(form.get("id", ""))
             if campaign is None:
