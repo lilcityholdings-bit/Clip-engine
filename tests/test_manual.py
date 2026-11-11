@@ -144,6 +144,7 @@ def test_produce_clips_an_uploaded_file_then_deletes_it(tmp_path, monkeypatch):
         transcribed.append((v, windows))
         return [{"start": 0, "end": 50, "text": "hi", "window": 0, "energy": 2.0}], words
     monkeypatch.setattr(media, "transcribe", fake_transcribe)
+    monkeypatch.setattr(media, "has_audio", lambda v: True)
     monkeypatch.setattr(media, "plan_layout", lambda v, s, e: layout.Layout("stack", left=0.3, right=0.7))
 
     def fake_render(video_path, out, *a, frame=None, music=None):
@@ -189,6 +190,7 @@ def _produce_fixture(tmp_path, monkeypatch, campaign_kwargs, titles):
     words = [{"start": 1.0 + i, "end": 1.5 + i, "word": f" w{i}"} for i in range(120)]
     monkeypatch.setattr(media, "transcribe", lambda v, m, windows=None: (
         [{"start": 0, "end": 150, "text": "hi", "window": 0, "energy": 2.0}], words))
+    monkeypatch.setattr(media, "has_audio", lambda v: True)
     monkeypatch.setattr(media, "plan_layout", lambda v, s, e: layout.Layout("stack", left=0.3, right=0.7))
     monkeypatch.setattr(media, "render", lambda video_path, out, *a, **k: (out.parent.mkdir(parents=True, exist_ok=True),
                                                                           out.write_bytes(b"clip"), out)[2])
@@ -234,3 +236,68 @@ def test_video_you_added_is_kept_when_no_account_is_ticked(tmp_path, monkeypatch
     pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok"), "instagram": FakePub("instagram")}
     assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 3) == 0
     assert manual.queue(conn)[0]["title"] == "Ep 1" and (tmp_path / "uploads" / "ep1.mp4").exists()
+
+
+# --- silent footage -----------------------------------------------------------
+
+def test_visual_windows_cut_on_shot_changes_and_spread_out():
+    from clip_engine import moments
+    # a 100 s video with shot changes every 12 s
+    cuts = [12.0 * i for i in range(1, 9)]
+    pieces = moments.visual_windows(cuts, 100.0, max_sec=30, count=10)
+    assert pieces[0][0] == 0.0 and all(b - a <= 30 for a, b in pieces) and all(b - a >= 10 for a, b in pieces)
+    assert all(pieces[i][1] == pieces[i + 1][0] for i in range(len(pieces) - 1))  # back to back, no overlap
+    assert all(end in cuts + [100.0] for _, end in pieces[:-1])  # each clip ends on a shot change
+    picked = moments.visual_windows(cuts, 100.0, max_sec=30, count=2)
+    assert len(picked) == 2 and picked[0] == pieces[0] and picked[1][0] > pieces[0][1]  # spread across the video
+    assert moments.visual_windows([], 8.0, max_sec=30, count=3) == []  # too short to clip
+    assert moments.visual_windows([], 70.0, max_sec=30, count=5) == [(0.0, 30.0), (30.0, 60.0), (60.0, 70.0)]  # one long shot is split
+
+
+def test_has_speech_needs_real_words():
+    from clip_engine import moments
+    assert not moments.has_speech([]) and not moments.has_speech([{"word": "x"}] * 5)
+    assert moments.has_speech([{"word": "x"}] * 40)
+
+
+def test_scene_cuts_finds_the_shot_changes_in_a_real_video(tmp_path):
+    import subprocess
+    video = tmp_path / "cuts.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=160x120:r=10:d=3",
+                    "-f", "lavfi", "-i", "color=c=blue:s=160x120:r=10:d=3", "-filter_complex", "[0][1]concat=n=2:v=1[v]",
+                    "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video)], check=True)
+    assert media.has_audio(video) is False
+    cuts = media.scene_cuts(video)
+    assert len(cuts) == 1 and 2.5 < cuts[0] < 3.5
+
+
+def test_silent_footage_is_cut_by_picture_when_captions_are_approved(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    caps = ["first look at the Ring Drone @Ring #ad"]
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {"approved_captions": caps}, ["unused"])
+    monkeypatch.setattr(media, "has_audio", lambda v: False)
+    monkeypatch.setattr(media, "transcribe", lambda *a, **k: (_ for _ in ()).throw(AssertionError("transcribed silence")))
+    monkeypatch.setattr(media, "scene_cuts", lambda v: [15.0, 40.0, 70.0, 110.0, 150.0])
+    monkeypatch.setattr(media, "duration", lambda p: 180.0)
+    rendered = []
+    monkeypatch.setattr(media, "render", lambda video_path, out, start, end, fmt, captions, **k: (
+        rendered.append((start, end, captions)), out.parent.mkdir(parents=True, exist_ok=True), out.write_bytes(b"c"), out)[3])
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 2
+    assert not claude.beta.messages.create.called  # no Claude call, so no cost
+    assert len(rendered) == 2 and all(10 <= b - a <= 58 for a, b, _ in rendered)
+    assert all("Dialogue" not in text for _, _, text in rendered)  # no burned-in words, no hook text
+    rows = conn.execute("SELECT title, description FROM clips").fetchall()
+    assert all(r["title"] == caps[0] == r["description"] for r in rows)
+
+
+def test_silent_footage_without_approved_captions_is_skipped(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["unused"])
+    monkeypatch.setattr(media, "has_audio", lambda v: False)
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 0

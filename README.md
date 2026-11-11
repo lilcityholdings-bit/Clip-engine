@@ -84,6 +84,8 @@ Some campaigns hand clippers a source video to download (a Drive or Dropbox file
 
 Some campaigns require one of their own captions, word for word, and forbid other hashtags, tags or links. Paste those into **Approved captions** (one per line) when adding the campaign. The engine then uses one of them, in turn, as every clip's title and caption, and adds nothing else: no hashtags, tags, credit line, links or on-screen hook text. The campaign's required `#ad` must already be inside the approved captions. Leave the box empty for the normal, engine-written captions.
 
+**Silent or speechless footage:** when a video has no speech to read (a product reel, b-roll) and the campaign has approved captions, the engine cuts it along the shot changes instead: back-to-back clips of 10-58 seconds that end on a cut, taken evenly across the video, framed vertically, with no burned-in words or hook text, and no Claude call. Without approved captions, a speechless video is skipped because there is no caption to write.
+
 ## Phone alerts
 
 Set `DIGEST_WEBHOOK_URL` to a Discord channel webhook (free; the Discord app gives push notifications). Within 5 minutes the engine messages you once when new clips are waiting for approval, and once when a clip you post by hand (TikTok, or Instagram until it's connected) reaches its posting time. Once an hour it also sends the new post links to paste into Whop. Use a Discord server owned by the company so it can be handed over.

@@ -22,7 +22,7 @@ Done
 - TikTok @littlecityclipz and an Instagram account created (professional/Creator), both under ceorob321@gmail.com; practice posts made on YouTube and TikTok.
 
 Open, in order
-0. Campaigns with approved captions (Ring - Drone Launch, from 2026-11-10): Approved captions box added 2026-11-11. Check before adding: the supplied footage has speech for the engine to pick moments from; YouTube's paid-promotion label can't be set by the API, so tick it in Studio.
+0. Campaigns with approved captions (Ring - Drone Launch, from 2026-11-10): Approved captions box added 2026-11-11. Silent footage is cut by shot changes (added 2026-11-11). YouTube's paid-promotion label can't be set by the API, so tick it in Studio.
 0. Campaigns that supply a download: use the dashboard's Add your own video (upload or link); added 2026-11-11, untested with a real phone upload.
 1. Join 1-3 clipping campaigns on Content Rewards (contentrewards.com, Whop's clipping product), pay on YouTube Shorts and TikTok, long talking source videos on YouTube, no ban on AI-assisted editing. Add each with Add a campaign (creator's YouTube channel as the source, never TikTok/Instagram links).
 2. Tap Resume, then Make clips now; approve the first clips. YouTube posts itself; TikTok is posted by hand from Ready to post.

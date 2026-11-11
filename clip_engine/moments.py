@@ -51,3 +51,35 @@ def same_window(clip: dict, segments: list[dict]) -> bool:
     """A clip must not jump across the gap between two transcribed windows."""
     inside = [s for s in segments if s["end"] > clip["start"] and s["start"] < clip["end"]]
     return bool(inside) and len({s.get("window", 0) for s in inside}) == 1
+
+
+MIN_SPEECH_WORDS = 20      # fewer than this and the video is treated as having no speech to clip by
+VISUAL_MIN_SEC = 10        # shortest clip when cutting by picture alone
+
+
+def has_speech(words: list[dict]) -> bool:
+    return len(words) >= MIN_SPEECH_WORDS
+
+
+def visual_windows(cuts: list[float], duration: float, max_sec: float, count: int,
+                   min_sec: float = VISUAL_MIN_SEC) -> list[tuple[float, float]]:
+    """Clips for a video with nothing to read, such as silent product footage: cut along the shot changes.
+
+    The video is split into back-to-back pieces that start where one ends. Each piece runs to the last shot
+    change within max_sec of its start (or max_sec if a single shot is longer), so a clip ends on a cut
+    instead of in the middle of one. Then `count` pieces are taken evenly across the video.
+    """
+    if duration < min_sec:
+        return []
+    boundaries = sorted({0.0, *[c for c in cuts if 0 < c < duration], float(duration)})
+    pieces: list[tuple[float, float]] = []
+    start = 0.0
+    while duration - start >= min_sec:
+        ends = [b for b in boundaries if min_sec <= b - start <= max_sec]
+        end = max(ends) if ends else min(start + max_sec, duration)
+        pieces.append((start, end))
+        start = end
+    if len(pieces) <= count:
+        return pieces
+    step = len(pieces) / count
+    return [pieces[int(i * step)] for i in range(count)]

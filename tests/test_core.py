@@ -335,6 +335,7 @@ def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
         seen_windows.append(windows)
         return [{"start": 0, "end": 50, "text": "hi", "window": 0, "energy": 2.0}], words
     monkeypatch.setattr(media, "transcribe", fake_transcribe)
+    monkeypatch.setattr(media, "has_audio", lambda v: True)
     from clip_engine import layout
     monkeypatch.setattr(media, "plan_layout", lambda v, s, e: layout.Layout("stack", left=0.3, right=0.7))
     centers = []

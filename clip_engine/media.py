@@ -1,5 +1,6 @@
 """Download, transcribe and render clips with ffmpeg and faster-whisper."""
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -184,6 +185,16 @@ def audio_graph(music: bool) -> str:
             "[bed][key]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=400[ducked];"
             "[voice][ducked]amix=inputs=2:duration=first:normalize=0,"
             "loudnorm=I=-14:TP=-1.5:LRA=11[aout]")
+
+
+def scene_cuts(video: Path, threshold: float = 0.3) -> list[float]:
+    """Times (seconds) where the picture changes shot, found on a small copy of the video so it is quick."""
+    result = subprocess.run(
+        ["ffmpeg", "-v", "info", "-an", "-i", str(video), "-vf", f"scale=320:-2,select='gt(scene,{threshold})',showinfo",
+         "-f", "null", "-"], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg scene detection failed: {result.stderr[-1000:]}")
+    return sorted({round(float(t), 2) for t in re.findall(r"pts_time:([0-9.]+)", result.stderr)})
 
 
 def has_audio(video: Path) -> bool:

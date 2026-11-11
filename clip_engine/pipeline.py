@@ -379,23 +379,34 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             video = media.download(src.video_url, work / "source.mp4")
         # Go straight to the most replayed parts when YouTube has that data.
         windows = moments.windows(src.heatmap, src.duration)
-        segments, words = media.transcribe(video, settings.whisper_model, windows or None)
-        moments.mark_replayed(segments, src.heatmap)
-        if not segments:
+        segments, words = [], []
+        if media.has_audio(video):  # a silent file can't be transcribed
+            segments, words = media.transcribe(video, settings.whisper_model, windows or None)
+        lo, hi = strategy.length_range(arms)
+        visual = False
+        if moments.has_speech(words):
+            moments.mark_replayed(segments, src.heatmap)
+            recent = policy.recent_titles(conn)
+            clips = ai.pick_clips(
+                claude, segments, source_title=src.title, fmt=arms["format"],
+                min_sec=lo, max_sec=hi, title_style=arms["title_style"], count=remaining,
+                rules=campaign.rules if campaign else "",
+                track_record=track_record(conn),
+                recent_titles=recent,
+                trends=trends.as_prompt(trends.brief(conn, claude, niche_of(campaign, arms), settings.trend_region)),
+            )
+        elif campaign and campaign.approved_captions:
+            # Nothing to read, but the caption is dictated anyway: cut the picture along its shot changes.
+            visual, recent = True, []
+            spans = moments.visual_windows(media.scene_cuts(video), src.duration, min(hi, 58), remaining)
+            clips = [{"start": a, "end": b, "title": "", "description": "", "tags": [], "hook_text": "",
+                      "hashtags": [], "score": None} for a, b in spans]
+            log.info("no speech in %s; cutting %d clips by shot changes", src.identifier, len(clips))
+        else:
             log.warning("no speech found in %s", src.identifier)
             return 0
-        lo, hi = strategy.length_range(arms)
-        recent = policy.recent_titles(conn)
-        clips = ai.pick_clips(
-            claude, segments, source_title=src.title, fmt=arms["format"],
-            min_sec=lo, max_sec=hi, title_style=arms["title_style"], count=remaining,
-            rules=campaign.rules if campaign else "",
-            track_record=track_record(conn),
-            recent_titles=recent,
-            trends=trends.as_prompt(trends.brief(conn, claude, niche_of(campaign, arms), settings.trend_region)),
-        )
         for i, clip in enumerate(clips):
-            if not moments.same_window(clip, segments):
+            if not visual and not moments.same_window(clip, segments):
                 log.info("skipping clip that crosses a transcript gap: %s", clip["title"])
                 continue
             fixed = approved_caption(conn, campaign) if campaign and campaign.approved_captions else ""
