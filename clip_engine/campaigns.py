@@ -57,6 +57,7 @@ class Campaign:
     platforms: list[str] = field(default_factory=lambda: ["youtube", "tiktok", "instagram"])
     niche: str = ""           # what the creator's content is about, for trend research
     allow_music: bool = True  # False if the program forbids adding background music
+    approved_captions: list[str] = field(default_factory=list)  # if set, a clip's caption is one of these, word for word, and nothing else
     active: bool = True
     ends_on: str | None = None
 
@@ -133,8 +134,9 @@ def from_form(form: dict[str, str], platforms: list[str]) -> Campaign:
         raise CampaignError("Pay per 1,000 views must be more than 0.")
     sources = [s.strip() for s in re.split(r"[\s,]+", form.get("sources", "")) if s.strip()]
     bad = [s for s in sources if not s.startswith(("http://", "https://"))]
-    if not sources or bad:
-        raise CampaignError("Add at least one link to the creator's channel, playlist or videos (each starting with https://).")
+    if bad:
+        raise CampaignError("Each video link must start with https:// (one per line), or leave the box empty if "
+                            "the campaign gives you files to upload yourself.")
     marked = [s for s in sources if watermarked(s)]
     if marked:
         raise CampaignError("TikTok, Instagram and Facebook videos carry the app's watermark, which TikTok and Instagram "
@@ -160,6 +162,7 @@ def from_form(form: dict[str, str], platforms: list[str]) -> Campaign:
         platforms=chosen,
         niche=form.get("niche", "").strip(),
         allow_music=form.get("allow_music") == "on",
+        approved_captions=list(dict.fromkeys(l.strip() for l in form.get("approved_captions", "").splitlines() if l.strip())),
         active=form.get("active", "on") == "on",
         ends_on=ends_on,
     )

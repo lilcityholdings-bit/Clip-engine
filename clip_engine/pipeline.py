@@ -200,6 +200,12 @@ def niche_of(campaign: campaigns.Campaign | None, arms: dict) -> str:
     return arms.get("topic", "education")
 
 
+def approved_caption(conn: sqlite3.Connection, campaign: campaigns.Campaign) -> str:
+    """The next of the campaign's approved captions, in turn, so consecutive clips don't repeat one."""
+    made = conn.execute("SELECT COUNT(*) FROM clips WHERE campaign_id = ?", (campaign.id,)).fetchone()[0]
+    return campaign.approved_captions[made % len(campaign.approved_captions)]
+
+
 def compose_description(clip: dict, footer: str) -> str:
     """Clip description, then its hashtags, then credit and disclosure."""
     tags = " ".join(policy.clean_hashtags(clip.get("hashtags", [])))
@@ -392,11 +398,17 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             if not moments.same_window(clip, segments):
                 log.info("skipping clip that crosses a transcript gap: %s", clip["title"])
                 continue
-            twin = policy.near_duplicate(clip["title"], recent)
-            if twin:
-                log.info("skipping clip that looks like a repeat of %r: %s", twin, clip["title"])
-                continue
-            recent.append(clip["title"])
+            fixed = approved_caption(conn, campaign) if campaign and campaign.approved_captions else ""
+            if fixed:
+                # The campaign dictates the caption: use it exactly, with no hashtags, tags, links, credit lines
+                # or on-screen hook text of our own, and don't treat its repeats as spam.
+                clip = {**clip, "title": fixed, "description": fixed, "tags": [], "hashtags": [], "hook_text": ""}
+            else:
+                twin = policy.near_duplicate(clip["title"], recent)
+                if twin:
+                    log.info("skipping clip that looks like a repeat of %r: %s", twin, clip["title"])
+                    continue
+                recent.append(clip["title"])
             clip = snap_to_words(clip, words)
             if arms["format"] == "short":
                 clip["end"] = min(clip["end"], clip["start"] + 59)
@@ -413,13 +425,13 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                 "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags,"
                 " arms, file_path, media_token, ai_score, hook_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (src.identifier, campaign.id if campaign else None, clip["start"], clip["end"], clip["title"],
-                 compose_description(clip, job.footer), json.dumps(clip["tags"]), json.dumps(arms),
+                 fixed or compose_description(clip, job.footer), json.dumps(clip["tags"]), json.dumps(arms),
                  str(out), token, clip.get("score"), clip.get("hook_text", "")),
             )
             reviewing = review_mode(conn)
             for platform in platforms:
-                manual = is_manual(publishers.get(platform))
-                status = "review" if reviewing else ("ready" if manual else "queued")
+                by_hand = is_manual(publishers.get(platform))
+                status = "review" if reviewing else ("ready" if by_hand else "queued")
                 conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, ?, ?, ?)",
                              (cur.lastrowid, platform, status, slot))
             conn.commit()

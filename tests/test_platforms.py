@@ -277,7 +277,7 @@ def test_add_edit_pause_delete_campaign(server, tmp_path, monkeypatch):
     ({"program_url": "whop.com/x"}, "campaign's page link"),
     ({"rate": "lots"}, "must be a number"),
     ({"rate": "0"}, "more than 0"),
-    ({"sources": "not a link"}, "creator's channel"),
+    ({"sources": "not a link"}, "must start with https://"),
     ({"ends_on": "next week"}, "2026-12-31"),
 ])
 def test_form_errors_keep_what_was_typed(server, tmp_path, change, message):

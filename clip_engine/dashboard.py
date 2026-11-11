@@ -256,6 +256,9 @@ def _campaign_form(values: dict | None, editing: bool, open_form: bool) -> str:
     sources = v.get("sources", "")
     if isinstance(sources, list):
         sources = "\n".join(sources)
+    captions = v.get("approved_captions", "")
+    if isinstance(captions, list):
+        captions = "\n".join(captions)
     music_checked = " checked" if v.get("allow_music", True) not in (False, "off") else ""
     active_checked = " checked" if v.get("active", True) not in (False, "off") else ""
     title = "Edit campaign" if editing else "Add a campaign"
@@ -266,8 +269,10 @@ def _campaign_form(values: dict | None, editing: bool, open_form: bool) -> str:
 <label>Campaign page link <small>the Whop (or other) page with the terms</small></label>
 <input type="url" name="program_url" required placeholder="https://whop.com/..." value="{val("program_url")}">
 <label>Pay per 1,000 views, in dollars</label><input type="text" name="rate" inputmode="decimal" required placeholder="1.50" value="{val("rate_per_1k_views")}">
-<label>Creator's videos <small>channel, playlist, Google Drive or Dropbox links; one per line</small></label>
-<textarea name="sources" required placeholder="https://www.youtube.com/@creator/videos">{e(sources)}</textarea>
+<label>Creator's videos <small>channel, playlist, Google Drive or Dropbox links; one per line. Leave empty if the campaign gives you files to download: you upload those under Add your own video</small></label>
+<textarea name="sources" placeholder="https://www.youtube.com/@creator/videos">{e(sources)}</textarea>
+<label>Approved captions <small>only if the campaign supplies them: one per line. The engine uses one exactly as written and adds nothing else (no hashtags, links, credit lines or on-screen text)</small></label>
+<textarea name="approved_captions" placeholder="first look at the new drone @brand #ad">{e(captions)}</textarea>
 <label>Required in every caption <small>tags or @mentions the campaign asks for</small></label>
 <input type="text" name="caption_required" placeholder="@creator #creatorclips" value="{val("caption_required")}">
 <label>Creator's rules <small>anything clips must or mustn't do</small></label>

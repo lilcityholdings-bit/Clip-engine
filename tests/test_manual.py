@@ -80,10 +80,10 @@ def test_manual_link_goes_through_yt_dlp_describe(tmp_path, monkeypatch):
 
 def test_dashboard_card_appears_only_with_a_live_campaign(server, tmp_path):
     base, _ = server
-    assert "Add your own video" not in _get(base + "/", "s3cret").read().decode()
+    assert 'id="own-video"' not in _get(base + "/", "s3cret").read().decode()
     _campaign(tmp_path)
     page = _get(base + "/", "s3cret").read().decode()
-    assert "Add your own video" in page and "Upload a video from this phone" in page and "Pod Show" in page
+    assert 'id="own-video"' in page and "Upload a video from this phone" in page and "Pod Show" in page
 
 
 def test_dashboard_upload_and_link_routes(server, tmp_path):
@@ -163,3 +163,74 @@ def test_produce_clips_an_uploaded_file_then_deletes_it(tmp_path, monkeypatch):
     description = conn.execute("SELECT description FROM clips").fetchone()[0]
     assert "Host Name" in description and "#ad" in description
     assert not video.exists() and manual.queue(conn) == []
+
+
+def test_form_accepts_approved_captions_and_no_channel(tmp_path):
+    form = {"name": "Ring Drone", "program_url": "https://whop.com/ring", "rate": "2", "sources": "",
+            "approved_captions": "first look at the Ring Drone @Ring #ad\r\n\r\n  first look at the Ring Drone @Ring #ad \nRing just announced the Ring Drone @Ring #ad\n"}
+    c = campaigns.from_form(form, ["youtube"])
+    assert c.sources == [] and c.approved_captions == ["first look at the Ring Drone @Ring #ad",
+                                                       "Ring just announced the Ring Drone @Ring #ad"]
+    with pytest.raises(campaigns.CampaignError, match="https://"):
+        campaigns.from_form({**form, "sources": "nope"}, ["youtube"])
+
+
+def _produce_fixture(tmp_path, monkeypatch, campaign_kwargs, titles):
+    from clip_engine import layout, trends
+    from tests.test_core import _claude_returning
+
+    conn = db.connect(tmp_path / "caps.db")
+    _campaign(tmp_path, platforms=["youtube", "tiktok"], **campaign_kwargs)
+    video = tmp_path / "uploads" / "ep1.mp4"
+    video.parent.mkdir(exist_ok=True)
+    video.write_bytes(b"source")
+    manual.add(conn, {"kind": "file", "ref": str(video), "campaign_id": "pod", "creator": "", "title": "Ep 1"})
+    monkeypatch.setattr(media, "duration", lambda p: 3000.0)
+    words = [{"start": 1.0 + i, "end": 1.5 + i, "word": f" w{i}"} for i in range(120)]
+    monkeypatch.setattr(media, "transcribe", lambda v, m, windows=None: (
+        [{"start": 0, "end": 150, "text": "hi", "window": 0, "energy": 2.0}], words))
+    monkeypatch.setattr(media, "plan_layout", lambda v, s, e: layout.Layout("stack", left=0.3, right=0.7))
+    monkeypatch.setattr(media, "render", lambda video_path, out, *a, **k: (out.parent.mkdir(parents=True, exist_ok=True),
+                                                                          out.write_bytes(b"clip"), out)[2])
+    monkeypatch.setattr(trends, "brief", lambda *a: {"hashtags": [], "phrases": [], "title_patterns": [], "notes": "", "sounds": []})
+    claude = _claude_returning({"clips": [
+        {"start": 1 + 40 * i, "end": 37 + 40 * i, "title": t, "description": "ai words", "tags": ["a"],
+         "hook_text": "Wait", "hashtags": ["#podcast"], "score": 8, "why": ""} for i, t in enumerate(titles)]})
+    return conn, claude
+
+
+def test_approved_captions_are_used_word_for_word_and_nothing_else(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    caps = ["first look at the Ring Drone @Ring #ad", "Ring just announced the Ring Drone @Ring #ad"]
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {"approved_captions": caps},
+                                    ["Same title here", "Same title here again"])  # near-identical AI titles
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 3) == 2
+    rows = conn.execute("SELECT title, description, tags, hook_text FROM clips ORDER BY id").fetchall()
+    assert [(r["title"], r["description"]) for r in rows] == [(caps[0], caps[0]), (caps[1], caps[1])]  # in turn
+    assert all(r["tags"] == "[]" and r["hook_text"] == "" for r in rows)
+    assert not any(x in r["description"] for r in rows for x in ("http", "#Shorts", "#podcast", "Paid clip"))
+
+
+def test_without_approved_captions_the_engine_writes_its_own(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["A good clip"])
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 3) == 1
+    description = conn.execute("SELECT description FROM clips").fetchone()[0]
+    assert "ai words" in description and "#ad" in description and "#podcast" in description
+
+
+def test_video_you_added_is_kept_when_no_account_is_ticked(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["A good clip"])
+    pipeline.set_post_to(conn, ["instagram"])  # the campaign pays on YouTube/TikTok only
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok"), "instagram": FakePub("instagram")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 3) == 0
+    assert manual.queue(conn)[0]["title"] == "Ep 1" and (tmp_path / "uploads" / "ep1.mp4").exists()

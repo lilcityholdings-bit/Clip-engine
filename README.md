@@ -80,6 +80,10 @@ Whop has no API for submitting clips, so new post links go to `DIGEST_WEBHOOK_UR
 
 Some campaigns hand clippers a source video to download (a Drive or Dropbox file, a download button) instead of a channel to watch. On the dashboard, under **Add your own video**, pick the campaign and either **upload the file from your phone** (up to `MAX_UPLOAD_MB`, default 2000) or **paste its link**. Your video is clipped before anything the engine finds on its own, credited to the creator name you give (or the campaign), with the campaign's tags and #ad. Uploaded files are deleted once their clips are made. Links go through yt-dlp, so YouTube, public Drive and Dropbox links work; private links don't, so upload those instead.
 
+## Campaigns with approved captions
+
+Some campaigns require one of their own captions, word for word, and forbid other hashtags, tags or links. Paste those into **Approved captions** (one per line) when adding the campaign. The engine then uses one of them, in turn, as every clip's title and caption, and adds nothing else: no hashtags, tags, credit line, links or on-screen hook text. The campaign's required `#ad` must already be inside the approved captions. Leave the box empty for the normal, engine-written captions.
+
 ## Phone alerts
 
 Set `DIGEST_WEBHOOK_URL` to a Discord channel webhook (free; the Discord app gives push notifications). Within 5 minutes the engine messages you once when new clips are waiting for approval, and once when a clip you post by hand (TikTok, or Instagram until it's connected) reaches its posting time. Once an hour it also sends the new post links to paste into Whop. Use a Discord server owned by the company so it can be handed over.
