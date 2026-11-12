@@ -107,6 +107,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 </style></head><body><main>
 <h1>Clip Engine <span class="{state_class}">&middot; {state}</span></h1>
 {banner}
+{todo}
 {start}
 {review}
 {ready}
@@ -119,7 +120,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 <form method="post" action="/{toggle}"><button class="primary">{toggle_label}</button></form>
 <form method="post" action="/run"><button>Make clips now</button></form>
 </div>{status}</section>
-<section><h2>Links to submit</h2>{pending}</section>
+<section id="links"><h2>Links to submit</h2>{pending}</section>
 <section id="campaigns"><h2>Campaigns</h2>{campaigns}{campaign_form}</section>
 {own_video}
 <section><h2>Trending now</h2>{trending}</section>
@@ -219,6 +220,30 @@ setInterval(function () {
   if (!busy && !playing && !window.uploading) location.replace(location.pathname);
 }, 20000);
 </script>"""
+
+
+def _todo(conn, settings: Settings) -> str:
+    """The top of the page: what needs you right now, each item a link to its section, then shortcuts."""
+    review = len(pipeline.awaiting_review(conn))
+    to_post = sum(len(c["posts"]) for c in pipeline.ready_to_post(conn))
+    links = len(pipeline.pending_submissions(conn))
+    items = []
+    if review:
+        items.append(f'<a class="button" href="#review"><b>{review}</b> clip{"s" if review > 1 else ""} to approve</a>')
+    if to_post:
+        items.append(f'<a class="button" href="#ready"><b>{to_post}</b> to post from your phone</a>')
+    if links:
+        items.append(f'<a class="button" href="#links"><b>{links}</b> link{"s" if links > 1 else ""} to submit</a>')
+    has_campaign = bool(campaigns.load(settings.data_dir))
+    if not items and not has_campaign:
+        return ""  # still setting up: the Getting started list leads
+    head = "".join(items) if items else '<span class="good">&#10003; Nothing needs you right now.</span>'
+    shortcuts = ['<a href="#campaigns">Campaigns</a>']
+    if campaigns.live(campaigns.load(settings.data_dir)):
+        shortcuts.append('<a href="#own-video">Add a video</a>')
+    shortcuts.append('<a href="#settings">Settings</a>')
+    return (f'<section id="todo"><div class="row">{head}</div>'
+            f'<div class="muted" style="margin-top:8px;font-size:13px">Go to: {" &middot; ".join(shortcuts)}</div></section>')
 
 
 def _status(conn) -> str:
@@ -580,6 +605,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
         campaign_form=_campaign_form(form_values, editing=bool(form_values and form_values.get("id")),
                                      open_form=bool(form_values) or not campaigns.load(settings.data_dir)),
         status=_status(conn),
+        todo=_todo(conn, settings),
         state="paused" if paused else "running", state_class="bad" if paused else "good",
         earned=f"{sum(r['estimated_usd'] for r in earn):,.2f}", views=f"{totals['views']:,}",
         posted=totals["posted"] or 0, queued=totals["queued"] or 0,

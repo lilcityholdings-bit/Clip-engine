@@ -841,3 +841,25 @@ def test_default_accounts_setting(server, tmp_path):
     assert pipeline.post_to(db.connect(tmp_path / "clip_engine.db")) == ["youtube", "instagram"]
     page = _get(base + "/settings/post-to", "s3cret", data=b"").read().decode()
     assert "Tick at least one account" in page
+
+
+def test_todo_bar_lists_what_needs_the_owner(server, tmp_path, monkeypatch):
+    base, conn = server
+    monkeypatch.delenv("CAMPAIGNS_JSON", raising=False)
+    assert 'id="todo"' not in _get(base + "/", "s3cret").read().decode()  # still setting up
+    campaigns.save(tmp_path, campaigns.Campaign(id="p", name="P", program_url="https://w", rate_per_1k_views=1, sources=[]))
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Nothing needs you right now" in page and 'href="#own-video"' in page
+    first = _queue_for_review(conn, tmp_path)
+    _queue_for_review(conn, tmp_path, token="d" * 32)
+    page = _get(base + "/", "s3cret").read().decode()
+    assert '<b>2</b> clips to approve' in page and 'href="#review"' in page
+    _get(base + "/review/approve", "s3cret", data=f"id={first}".encode())
+    conn.execute("UPDATE posts SET status = 'ready' WHERE clip_id = ? AND platform = 'tiktok'", (first,))
+    conn.execute("UPDATE clips SET campaign_id = 'p' WHERE id = ?", (first,))
+    conn.execute("UPDATE posts SET status = 'posted', url = 'https://youtu.be/x', posted_at = datetime('now')"
+                 " WHERE clip_id = ? AND platform = 'youtube'", (first,))
+    conn.commit()
+    page = _get(base + "/", "s3cret").read().decode()
+    assert '<b>1</b> clip to approve' in page and '<b>1</b> to post from your phone' in page
+    assert '<b>1</b> link to submit' in page and 'id="links"' in page
