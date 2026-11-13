@@ -347,6 +347,14 @@ def status(conn: sqlite3.Connection) -> dict:
     return saved
 
 
+def chain_next(conn: sqlite3.Connection, made: int) -> bool:
+    """After a run that made clips, go straight on to the next video you queued instead of waiting hours."""
+    if made and manual.queue(conn):
+        db.put(conn, "run_now", "1")
+        return True
+    return False
+
+
 def _note(conn: sqlite3.Connection, text: str) -> None:
     """Why the last run made no clips, in words for the owner."""
     log.info(text)

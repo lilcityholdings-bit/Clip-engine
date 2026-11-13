@@ -250,7 +250,7 @@ def test_visual_windows_cut_on_shot_changes_and_spread_out():
     assert all(end in cuts + [100.0] for _, end in pieces[:-1])  # each clip ends on a shot change
     picked = moments.visual_windows(cuts, 100.0, max_sec=30, count=2)
     assert len(picked) == 2 and picked[0] == pieces[0] and picked[1][0] > pieces[0][1]  # spread across the video
-    assert moments.visual_windows([], 8.0, max_sec=30, count=3) == []  # too short to clip
+    assert moments.visual_windows([], 3.0, max_sec=30, count=3) == []  # too short to clip
     assert moments.visual_windows([], 70.0, max_sec=30, count=5) == [(0.0, 30.0), (30.0, 60.0), (60.0, 70.0)]  # one long shot is split
 
 
@@ -354,3 +354,14 @@ def test_bullets_pasted_from_a_google_doc_are_not_part_of_the_caption():
         "Ring just announced the Ring Drone @Ring #ad",
         "this is the new Ring Drone from @Ring #ad"]
     assert campaigns.approved_captions("  a caption  \na caption\n") == ["a caption"]
+
+
+def test_short_videos_are_posted_whole_and_queued_videos_run_back_to_back(tmp_path):
+    from clip_engine import moments
+    assert moments.visual_windows([], 7.0, max_sec=58, count=3) == [(0.0, 7.0)]  # a 7 s product teaser is one clip
+    assert moments.visual_windows([], 4.0, max_sec=58, count=3) == []
+    conn = db.connect(tmp_path / "c.db")
+    assert pipeline.chain_next(conn, 2) is False  # nothing queued
+    manual.add(conn, {"kind": "file", "ref": "/x.mp4", "campaign_id": "r"})
+    assert pipeline.chain_next(conn, 0) is False and db.get(conn, "run_now") != "1"  # that run made nothing: don't loop
+    assert pipeline.chain_next(conn, 2) is True and db.get(conn, "run_now") == "1"

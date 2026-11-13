@@ -155,6 +155,7 @@ def main(argv: list[str]) -> int:
             pipeline.set_status(conn, "failed", f"Making clips failed and will be tried again: {exc}"[:300])
             pipeline.notify(settings.digest_webhook_url, f"clip-engine: produce failed and will retry: {exc!r}")
             return 1
+        pipeline.chain_next(conn, made)
         if made:
             pipeline.set_status(conn, "done", f"Made {made} new clip{'s' if made > 1 else ''}. Scroll up to review "
                                               f"{'them' if made > 1 else 'it'}.")

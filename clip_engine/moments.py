@@ -54,7 +54,7 @@ def same_window(clip: dict, segments: list[dict]) -> bool:
 
 
 MIN_SPEECH_WORDS = 20      # fewer than this and the video is treated as having no speech to clip by
-VISUAL_MIN_SEC = 10        # shortest clip when cutting by picture alone
+VISUAL_MIN_SEC = 5         # shortest clip when cutting by picture alone (short product videos are posted whole)
 
 
 def has_speech(words: list[dict]) -> bool:
