@@ -83,7 +83,7 @@ def test_dashboard_card_appears_only_with_a_live_campaign(server, tmp_path):
     assert 'id="own-video"' not in _get(base + "/", "s3cret").read().decode()
     _campaign(tmp_path)
     page = _get(base + "/", "s3cret").read().decode()
-    assert 'id="own-video"' in page and "Upload a video from this phone" in page and "Pod Show" in page
+    assert 'id="own-video"' in page and "Upload videos or photos from this phone" in page and "Pod Show" in page
 
 
 def test_dashboard_upload_and_link_routes(server, tmp_path):
@@ -365,3 +365,138 @@ def test_short_videos_are_posted_whole_and_queued_videos_run_back_to_back(tmp_pa
     manual.add(conn, {"kind": "file", "ref": "/x.mp4", "campaign_id": "r"})
     assert pipeline.chain_next(conn, 0) is False and db.get(conn, "run_now") != "1"  # that run made nothing: don't loop
     assert pipeline.chain_next(conn, 2) is True and db.get(conn, "run_now") == "1"
+
+
+# --- several videos and photos made into one video -------------------------------------------
+
+def test_plan_pieces_fits_one_short():
+    assert media.plan_pieces([(True, 3), (False, 40), (True, 3)]) == [3.0, 15.0, 3.0]  # photo 3s, video's first 15s
+    assert media.plan_pieces([(False, 1.0)]) == [1.0]  # a very short video is used whole
+    many = media.plan_pieces([(True, 3)] * 30)  # 90s of photos: shortened, never below the minimum
+    assert sum(many) <= media.COMPILATION_MAX_SEC and all(x >= media.MIN_IMAGE_SEC for x in many)
+    mixed = media.plan_pieces([(False, 60)] * 10)  # 150s wanted: shrunk in proportion and the tail dropped if needed
+    assert sum(mixed) <= media.COMPILATION_MAX_SEC and len(mixed) <= 10
+
+
+def test_photos_are_accepted_and_batches_become_one_project(tmp_path):
+    conn = db.connect(tmp_path / "b.db")
+    assert manual.is_image("IMG_1.JPG") and not manual.is_image("a.mp4")
+    paths = [manual.save_upload(io.BytesIO(b"x" * 10), 10, name, tmp_path) for name in ("a.jpg", "b.mp4", "c.png")]
+    for p in paths:
+        manual.add_to_batch(conn, "abc123xyz", p)
+    assert manual.queue(conn) == []  # nothing is queued until the last file lands
+    assert manual.finish_batch(conn, "abc123xyz", {"campaign_id": "pod"}) == 3
+    item = manual.queue(conn)[0]
+    assert item["kind"] == "project" and item["files"] == [str(p) for p in paths]  # upload order kept
+    with pytest.raises(manual.UploadError):
+        manual.finish_batch(conn, "abc123xyz", {})
+    with pytest.raises(manual.UploadError):
+        manual.clean_batch_id("../../x")
+    manual.discard(item)
+    assert not any(p.exists() for p in paths)
+
+
+def test_unfinished_batches_are_cleaned_up_after_a_day(tmp_path):
+    conn = db.connect(tmp_path / "b.db")
+    leftover = manual.save_upload(io.BytesIO(b"x" * 10), 10, "a.jpg", tmp_path)
+    manual.add_to_batch(conn, "oldbatch1", leftover)
+    manual.expire_batches(conn, now=__import__("time").time() + 25 * 3600)
+    assert not leftover.exists() and manual._batches(conn) == {}
+
+
+def test_assemble_builds_one_vertical_video_from_photos_and_a_video(tmp_path):
+    import subprocess
+    def ff(*args):
+        subprocess.run(["ffmpeg", "-y", "-v", "error", *args], check=True)
+    ff("-f", "lavfi", "-i", "testsrc2=s=1600x1200:d=1", "-frames:v", "1", str(tmp_path / "a.jpg"))
+    ff("-f", "lavfi", "-i", "smptebars=s=900x1600", "-frames:v", "1", str(tmp_path / "b.png"))
+    ff("-f", "lavfi", "-i", "testsrc=s=1280x720:d=4:r=24", "-f", "lavfi", "-i", "sine=f=440:d=4", "-shortest",
+       str(tmp_path / "v.mp4"))
+    out = media.assemble([tmp_path / "a.jpg", tmp_path / "v.mp4", tmp_path / "b.png"], tmp_path / "out.mp4", tmp_path / "w")
+    assert media._dimensions(out) == (1080, 1920) and media.has_audio(out)
+    assert 9.5 < media.duration(out) < 10.5  # 3s photo + 4s video + 3s photo
+    photos = media.assemble([tmp_path / "a.jpg", tmp_path / "b.png"], tmp_path / "p.mp4", tmp_path / "w2")
+    assert not media.has_audio(photos) and 5.5 < media.duration(photos) < 6.5
+
+
+def test_dashboard_upload_batch_route_queues_one_project(server, tmp_path):
+    base, _ = server
+    _campaign(tmp_path)
+
+    def upload(query, body):
+        req = urllib.request.Request(f"{base}/manual-video/upload?{query}", data=body, method="POST")
+        req.add_header("Origin", base)
+        req.add_header("Authorization", "Basic " + base64.b64encode(b"me:s3cret").decode())
+        try:
+            resp = urllib.request.urlopen(req, timeout=5)
+            return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as err:
+            return err.code, json.loads(err.read() or b"{}")
+
+    assert upload("campaign=pod&name=a.jpg", b"photo")[0] == 400  # a photo alone can't be clipped
+    assert upload("campaign=pod&name=a.jpg&batch=batch0001&last=", b"photo") == (200, {"message": "File added."})
+    conn = db.connect(tmp_path / "clip_engine.db")
+    assert manual.queue(conn) == []
+    status, reply = upload("campaign=pod&name=b.mp4&batch=batch0001&last=1&title=Drone", b"video")
+    assert status == 200 and "2 files" in reply["message"] and "one video" in reply["message"]
+    item = manual.queue(conn)[0]
+    assert item["kind"] == "project" and len(item["files"]) == 2 and item["title"] == "Drone"
+    assert db.get(conn, "run_now") == "1"
+
+
+def test_produce_posts_a_combined_video_whole_with_the_approved_caption(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    caps = ["first look at the Ring Drone @Ring #ad"]
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {"approved_captions": caps}, ["unused"])
+    db.put(conn, manual.QUEUE_KEY, "[]")  # drop the fixture's own upload; only the combined video is queued
+    pieces = []
+    for name in ("a.jpg", "b.mp4"):
+        f = tmp_path / "uploads" / name
+        f.parent.mkdir(exist_ok=True)
+        f.write_bytes(b"piece")
+        pieces.append(str(f))
+    manual.add(conn, {"kind": "project", "files": pieces, "campaign_id": "pod", "creator": "", "title": "Drone"})
+    built = []
+
+    def fake_assemble(files, out, work):
+        built.append([f.name for f in files])
+        out.write_bytes(b"combined")
+        return out
+    monkeypatch.setattr(media, "assemble", fake_assemble)
+    monkeypatch.setattr(media, "duration", lambda p: 14.0)
+    monkeypatch.setattr(media, "transcribe", lambda *a, **k: (_ for _ in ()).throw(AssertionError("transcribed")))
+    monkeypatch.setattr(media, "plan_layout", lambda *a: (_ for _ in ()).throw(AssertionError("re-framed")))
+    rendered = []
+    monkeypatch.setattr(media, "render", lambda video_path, out, start, end, fmt, captions, frame=None, **k: (
+        rendered.append((start, end, fmt, frame.kind)), out.parent.mkdir(parents=True, exist_ok=True),
+        out.write_bytes(b"c"), out)[3])
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 1
+    assert built == [["a.jpg", "b.mp4"]]  # in upload order
+    assert rendered == [(0.0, 14.0, "short", "blur")]  # the whole video, vertical, not re-framed
+    assert not claude.beta.messages.create.called
+    row = conn.execute("SELECT title, description FROM clips").fetchone()
+    assert row["title"] == caps[0] == row["description"]
+    left = {f.name for f in (tmp_path / "uploads").iterdir()}
+    assert manual.queue(conn) == [] and left == {"ep1.mp4"}  # your files and the combined copy are gone
+
+
+def test_combined_video_without_approved_captions_uses_your_title_and_the_campaign_credit(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["unused"])
+    db.put(conn, manual.QUEUE_KEY, "[]")
+    f = tmp_path / "uploads" / "a.jpg"
+    f.parent.mkdir(exist_ok=True)
+    f.write_bytes(b"piece")
+    manual.add(conn, {"kind": "project", "files": [str(f)], "campaign_id": "pod", "creator": "", "title": "Our drone"})
+    monkeypatch.setattr(media, "assemble", lambda files, out, work: (out.write_bytes(b"c"), out)[1])
+    monkeypatch.setattr(media, "duration", lambda p: 6.0)
+    monkeypatch.setattr(media, "render", lambda video_path, out, *a, **k: (
+        out.parent.mkdir(parents=True, exist_ok=True), out.write_bytes(b"c"), out)[2])
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube")}, 2) == 1
+    row = conn.execute("SELECT title, description FROM clips").fetchone()
+    assert row["title"] == "Our drone" and "#pod" in row["description"] and "#ad" in row["description"].lower()

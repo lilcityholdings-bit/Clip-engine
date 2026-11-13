@@ -240,3 +240,83 @@ def render(video: Path, out: Path, start: float, end: float, fmt: str, captions:
     ], cwd=out.parent)
     subs.unlink(missing_ok=True)
     return out
+
+
+# --- one video from several files -------------------------------------------
+
+IMAGE_SEC = 3.0        # each photo is on screen this long (a slow zoom keeps it moving)
+MIN_IMAGE_SEC = 1.5
+VIDEO_MAX_SEC = 15.0   # the most taken from the start of any one video
+MIN_VIDEO_SEC = 2.0
+COMPILATION_MAX_SEC = 58.0  # the finished video must stay a Short
+
+
+def plan_pieces(pieces: list[tuple[bool, float]], budget: float = COMPILATION_MAX_SEC) -> list[float]:
+    """Seconds to use from each (is_photo, length) piece so the whole fits in one Short.
+
+    Photos get IMAGE_SEC and videos their first VIDEO_MAX_SEC. When that is too long, everything is
+    shortened in proportion (never below a minimum), and if it still doesn't fit, the last pieces are dropped.
+    """
+    want = [IMAGE_SEC if photo else min(length, VIDEO_MAX_SEC) for photo, length in pieces]
+    if sum(want) > budget:
+        scale = budget / sum(want)
+        want = [round(w * scale, 2) if photo else min(length, max(MIN_VIDEO_SEC, round(w * scale, 2)))
+                for (photo, length), w in zip(pieces, want)]
+        want = [max(MIN_IMAGE_SEC, w) if photo else w for (photo, _), w in zip(pieces, want)]
+        while sum(want) > budget and len(want) > 1:
+            want.pop()
+    return want
+
+
+_FIT = ("split[a][b];[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg];"
+        "[b]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2")
+_VIDEO_ENCODE = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-r", "30"]
+_AUDIO_ENCODE = ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
+
+
+def _segment(src: Path, out: Path, seconds: float, photo: bool, index: int, audio: bool) -> None:
+    """One piece as a 1080x1920, 30 fps clip: a photo with a slow zoom, or the start of a video, on a blurred fill."""
+    silent = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+    if photo:
+        frames = max(1, round(seconds * 30))
+        zoom = (f"min(1+0.10*on/{frames},1.10)" if index % 2 == 0 else f"max(1.10-0.10*on/{frames},1.0)")
+        # blown up first so the zoom steps are sub-pixel and don't shimmer
+        graph = (f"[0:v]{_FIT},scale=2160:3840,zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                 f":d={frames}:s=1080x1920:fps=30,format=yuv420p,setsar=1[v]")
+        inputs, audio_map = ["-i", str(src), *silent], ["-map", "1:a"]
+    else:
+        graph = f"[0:v]fps=30,{_FIT},format=yuv420p,setsar=1[v]"
+        if has_audio(src):
+            graph += ";[0:a]aresample=48000,aformat=channel_layouts=stereo,apad[a]"
+            inputs, audio_map = ["-i", str(src)], ["-map", "[a]"]
+        else:
+            inputs, audio_map = ["-i", str(src), *silent], ["-map", "1:a"]
+    _run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", graph, "-map", "[v]",
+          *(audio_map if audio else []), "-t", f"{seconds:.2f}", *_VIDEO_ENCODE, *(_AUDIO_ENCODE if audio else []),
+          "-movflags", "+faststart", str(out)])
+
+
+def assemble(pieces: list[Path], out: Path, work: Path) -> Path:
+    """Join videos and photos, in the order given, into one 1080x1920 video of at most 58 seconds.
+
+    Every piece is framed the same way (fitted over a blurred copy of itself), photos slowly zoom,
+    and the pieces are cut together back to back. The soundtrack is the videos' own sound, with
+    silence under photos; a set of photos alone has no audio track.
+    """
+    from . import manual
+    work.mkdir(parents=True, exist_ok=True)
+    kinds = [manual.is_image(p) for p in pieces]
+    lengths = [IMAGE_SEC if photo else duration(p) for p, photo in zip(pieces, kinds)]
+    plan = plan_pieces(list(zip(kinds, lengths)))
+    pieces, kinds = pieces[:len(plan)], kinds[:len(plan)]
+    audio = any(not photo and has_audio(p) for p, photo in zip(pieces, kinds))
+    segments = []
+    for i, (piece, photo, seconds) in enumerate(zip(pieces, kinds, plan)):
+        seg = work / f"seg{i:02d}.mp4"
+        _segment(piece, seg, seconds, photo, i, audio)
+        segments.append(seg)
+    listing = work / "list.txt"
+    listing.write_text("".join(f"file '{s.name}'\n" for s in segments), encoding="utf-8")
+    _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", listing.name, "-c", "copy",
+          "-movflags", "+faststart", str(out.resolve())], cwd=work)
+    return out

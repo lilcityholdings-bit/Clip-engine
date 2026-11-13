@@ -20,6 +20,7 @@ import anthropic
 from . import ai, campaigns, db, manual, media, moments, policy, sources, strategy, trends
 from .config import Settings
 from .db import clips_today, posts_today
+from .layout import Layout
 from .platforms import ALL_PLATFORMS, PublishError, is_manual, next_slot
 from .youtube import YouTube
 
@@ -35,6 +36,7 @@ class Job:
     footer: str                 # appended to every clip's description
     campaign: campaigns.Campaign | None = None
     item: dict | None = None    # the queued video you handed over, if this job came from one
+    whole: bool = False         # a video built from several of your files: it is posted as one clip, uncut
 
 
 def attribution(src: sources.Source, fmt: str) -> str:
@@ -150,8 +152,12 @@ def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
             log.info("dropping %s: its campaign isn't live", item)
             manual.discard(item)
             continue
+        whole = False
         try:
-            if item["kind"] == "file":
+            if item["kind"] == "project":
+                src = _build_project(item, campaign)
+                whole = True
+            elif item["kind"] == "file":
                 path = Path(item["ref"])
                 src = sources.Source(
                     identifier=f"upload:{path.stem}", title=item.get("title") or path.stem,
@@ -171,8 +177,27 @@ def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
         formats = [f for f in campaign.formats if f in strategy.FORMATS] or ["short"]
         arms = strategy.plan(conn, [campaign.id], subject_dim="campaign", formats=formats,
                              music=music if campaign.allow_music else None)
-        return Job(arms, src, campaigns.caption_lines(campaign, src, arms["format"]), campaign, item)
+        if whole:
+            arms["format"] = "short"  # the video is built vertical
+        return Job(arms, src, campaigns.caption_lines(campaign, src, arms["format"]), campaign, item, whole)
     return None
+
+
+def _build_project(item: dict, campaign: campaigns.Campaign) -> sources.Source:
+    """Join the files you uploaded together (videos and photos) into one vertical video."""
+    files = [Path(f) for f in item["files"] if Path(f).exists()]
+    if not files:
+        raise FileNotFoundError("none of the uploaded files are left")
+    stem = Path(files[0]).stem
+    work = files[0].parent / f"build-{stem}"
+    try:
+        built = media.assemble(files, files[0].parent / f"{stem}-combined.mp4", work)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    return sources.Source(
+        identifier=f"upload:{stem}", title=item.get("title") or campaign.name,
+        creator=item.get("creator") or campaign.name, license_url=campaign.program_url,
+        video_url=str(built), duration=media.duration(built), page=campaign.program_url)
 
 
 # --- shared ----------------------------------------------------------------
@@ -452,11 +477,16 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
         # Go straight to the most replayed parts when YouTube has that data.
         windows = moments.windows(src.heatmap, src.duration)
         segments, words = [], []
-        if media.has_audio(video):  # a silent file can't be transcribed
+        if not job.whole and media.has_audio(video):  # a silent file can't be transcribed
             segments, words = media.transcribe(video, settings.whisper_model, windows or None)
         lo, hi = strategy.length_range(arms)
         visual = False
-        if moments.has_speech(words):
+        if job.whole:
+            # Built from your own files: the whole video is the clip, never cut up or re-framed.
+            visual, recent = True, []
+            clips = [{"start": 0.0, "end": min(src.duration, media.COMPILATION_MAX_SEC), "title": src.title,
+                      "description": "", "tags": [], "hook_text": "", "hashtags": [], "score": None}]
+        elif moments.has_speech(words):
             moments.mark_replayed(segments, src.heatmap)
             recent = policy.recent_titles(conn)
             clips = ai.pick_clips(
@@ -498,7 +528,10 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             if arms["format"] == "short":
                 clip["end"] = min(clip["end"], clip["start"] + 59)
             token = secrets.token_hex(16)
-            frame = media.plan_layout(video, clip["start"], clip["end"]) if arms["format"] == "short" else None
+            if job.whole:
+                frame = Layout("blur")
+            else:
+                frame = media.plan_layout(video, clip["start"], clip["end"]) if arms["format"] == "short" else None
             out = media.render(
                 video, out_dir / f"{token}.mp4", clip["start"], clip["end"], arms["format"],
                 media.captions_ass(words, clip["start"], clip["end"], arms["format"], clip.get("hook_text", ""),
@@ -529,10 +562,12 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
         conn.execute("UPDATE sources SET processed_at = datetime('now') WHERE identifier = ?", (src.identifier,))
         conn.commit()
         shutil.rmtree(work, ignore_errors=True)
-        if job.item and job.item.get("kind") == "file":
+        if job.whole:
+            Path(src.video_url).unlink(missing_ok=True)  # the combined copy; your own files are kept for a retry
+        if job.item and job.item.get("kind") in ("file", "project"):
             attempts = job.item.get("attempts", 0) + 1
             if finished or queued or attempts >= MAX_UPLOAD_ATTEMPTS:
-                Path(src.video_url).unlink(missing_ok=True)  # used (or given up on): free the disk
+                manual.discard(job.item)  # used (or given up on): free the disk
             else:  # it failed part-way: keep your upload and try it again on the next run
                 manual.add(conn, {**job.item, "attempts": attempts}, front=True)
     return queued

@@ -192,22 +192,35 @@ def _campaign_rows(settings: Settings) -> str:
 
 UPLOAD_JS = """<script>
 function sendVideo(form, btn) {
-  const file = form.file.files[0];
-  if (!file) { alert('Choose a video first.'); return false; }
-  const q = new URLSearchParams({campaign: form.campaign.value, creator: form.creator.value,
-                                 title: form.title.value, name: file.name});
+  const files = Array.from(form.file.files);
+  if (!files.length) { alert('Choose at least one file first.'); return false; }
+  const combine = form.mode.value === 'combine';
+  const batch = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   const status = form.querySelector('.status');
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', '/manual-video/upload?' + q.toString());
-  xhr.upload.onprogress = e => { if (e.lengthComputable) status.textContent = 'Uploading ' + Math.round(100 * e.loaded / e.total) + '%'; };
-  xhr.onload = () => {
-    let reply = {};
-    try { reply = JSON.parse(xhr.responseText); } catch (err) {}
-    location.href = '/?' + (xhr.status === 200 ? 'notice=' : 'error=') + encodeURIComponent(reply.message || 'Upload failed (' + xhr.status + ').');
+  let i = 0;
+  const fail = text => { status.textContent = text; btn.disabled = false; window.uploading = false; };
+  const next = () => {
+    const file = files[i];
+    const q = new URLSearchParams({campaign: form.campaign.value, creator: form.creator.value,
+                                   title: form.title.value, name: file.name,
+                                   batch: combine ? batch : '', last: i === files.length - 1 ? '1' : ''});
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/manual-video/upload?' + q.toString());
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) status.textContent = 'Uploading file ' + (i + 1) + ' of ' + files.length + ': ' + Math.round(100 * e.loaded / e.total) + '%';
+    };
+    xhr.onload = () => {
+      let reply = {};
+      try { reply = JSON.parse(xhr.responseText); } catch (err) {}
+      if (xhr.status !== 200) { location.href = '/?error=' + encodeURIComponent(reply.message || 'Upload failed (' + xhr.status + ').'); return; }
+      i += 1;
+      if (i < files.length) { next(); } else { location.href = '/?notice=' + encodeURIComponent(reply.message || 'Uploaded.'); }
+    };
+    xhr.onerror = () => fail('Upload failed. Check your connection and try again.');
+    xhr.send(file);
   };
-  xhr.onerror = () => { status.textContent = 'Upload failed. Check your connection and try again.'; btn.disabled = false; window.uploading = false; };
-  btn.disabled = true; window.uploading = true; status.textContent = 'Uploading 0%';
-  xhr.send(file);
+  btn.disabled = true; window.uploading = true; status.textContent = 'Uploading file 1 of ' + files.length;
+  next();
   return false;
 }
 </script>"""
@@ -271,19 +284,24 @@ def _own_video(conn, settings: Settings) -> str:
     queue_html = ""
     if waiting:
         queue_html = ('<div class="muted" style="margin:8px 0">Waiting to be clipped: '
-                      + "; ".join(e(w.get("title") or w["ref"][-40:]) for w in waiting) + '</div>')
+                      + "; ".join(e(w.get("title") or (f"{len(w['files'])} files, one video" if w.get("kind") == "project" else w["ref"][-40:])) for w in waiting) + '</div>')
     common = (f'<label>Campaign</label><select name="campaign" style="width:100%;font:inherit;padding:9px">{options}</select>'
               '<label>Creator\'s name <small>(credited in the caption; optional)</small></label>'
               '<input type="text" name="creator">'
-              '<label>Title <small>(for your own reference; optional)</small></label><input type="text" name="title">')
+              '<label>Title <small>(optional; the post title when the campaign has no approved captions)</small></label><input type="text" name="title">')
     return (
         '<section id="own-video"><h2>Add your own video</h2>'
         '<p class="muted">Some campaigns give you a video to download instead of a channel to watch. Upload it here, '
         'or paste its link, and the engine clips it before anything else. Then tap Make clips now.</p>' + queue_html +
-        f'<details><summary>Upload a video from this phone</summary>'
+        f'<details><summary>Upload videos or photos from this phone</summary>'
         f'<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">{common}'
-        f'<label>Video file <small>(up to {manual.MAX_UPLOAD_MB} MB)</small></label>'
-        f'<input type="file" name="file" accept="video/*"><div class="muted status" style="margin:6px 0"></div>'
+        f'<label>Files <small>(videos and photos, up to {manual.MAX_UPLOAD_MB} MB each; pick several at once)</small></label>'
+        f'<input type="file" name="file" accept="video/*,image/*" multiple>'
+        f'<div class="checks" style="flex-direction:column;align-items:flex-start;margin-top:8px">'
+        f'<label><input type="radio" name="mode" value="combine" checked> Make <b>one video</b> from all of them, '
+        f'in the order picked (photos zoom slowly; up to 58 seconds)</label>'
+        f'<label><input type="radio" name="mode" value="each"> Clip <b>each video</b> separately (videos only)</label></div>'
+        f'<div class="muted status" style="margin:6px 0"></div>'
         f'<button class="primary" type="submit">Upload</button></form></details>'
         f'<details style="margin-top:10px"><summary>Paste a link instead</summary>'
         f'<form method="post" action="/manual-video/link">{common}'
@@ -995,6 +1013,10 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
             try:
                 if self._live_campaign(query.get("campaign", "")) is None:
                     raise manual.UploadError("Pick one of your live campaigns.")
+                batch = manual.clean_batch_id(query.get("batch", ""))
+                if not batch and manual.is_image(query.get("name", "")):
+                    raise manual.UploadError("Photos have to be made into a video. Choose Make one video from all of "
+                                             "them.")
                 length = int(self.headers.get("Content-Length") or 0)
                 path = manual.save_upload(self.rfile, length, query.get("name", ""), settings.data_dir)
             except manual.UploadError as exc:
@@ -1004,6 +1026,19 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                 return reply(500, "The upload failed. Try again.")
             conn = db.connect(settings.db_path)
             try:
+                if batch:
+                    try:
+                        manual.add_to_batch(conn, batch, path)
+                        if query.get("last") == "1":
+                            count = manual.finish_batch(conn, batch, {
+                                "campaign_id": query["campaign"], "creator": manual.clean_text(query.get("creator", "")),
+                                "title": manual.clean_text(query.get("title", ""))})
+                            db.put(conn, "run_now", "1")
+                            return reply(200, f"{count} file{'s' if count > 1 else ''} uploaded. They'll be made into "
+                                              "one video. Now tap Make clips now.")
+                    except manual.UploadError as exc:
+                        return reply(400, str(exc))
+                    return reply(200, "File added.")
                 manual.add(conn, {"kind": "file", "ref": str(path), "campaign_id": query["campaign"],
                                   "creator": manual.clean_text(query.get("creator", "")),
                                   "title": manual.clean_text(query.get("title", "")) or Path(query["name"]).stem[:60]})
