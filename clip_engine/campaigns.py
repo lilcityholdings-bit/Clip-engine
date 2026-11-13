@@ -118,7 +118,7 @@ class CampaignError(ValueError):
     """A form value that can't be used, worded for the person filling in the form."""
 
 
-BULLETS = "\u2022\u25cf\u25cb\u25aa\u25a0\u25e6\u2023\u2043*\u00b7\u2013\u2014"
+BULLETS = "\u2022\u25cf\u25cb\u25aa\u25a0\u25e6\u2023\u2043*\u00b7\u2013\u2014-"
 
 
 def approved_captions(text: str) -> list[str]:
