@@ -118,6 +118,16 @@ class CampaignError(ValueError):
     """A form value that can't be used, worded for the person filling in the form."""
 
 
+BULLETS = "\u2022\u25cf\u25cb\u25aa\u25a0\u25e6\u2023\u2043*\u00b7\u2013\u2014"
+
+
+def approved_captions(text: str) -> list[str]:
+    """One caption per line, as pasted. Bullet marks that come along when copying a list out of a Google Doc
+    are removed, since the campaign wants the caption exactly as written and a bullet isn't part of it."""
+    lines = (line.strip().lstrip(BULLETS + " \t").strip() for line in text.splitlines())
+    return list(dict.fromkeys(line for line in lines if line))
+
+
 def from_form(form: dict[str, str], platforms: list[str]) -> Campaign:
     """Build a campaign from the dashboard form, or raise CampaignError explaining what to fix."""
     name = form.get("name", "").strip()
@@ -162,7 +172,7 @@ def from_form(form: dict[str, str], platforms: list[str]) -> Campaign:
         platforms=chosen,
         niche=form.get("niche", "").strip(),
         allow_music=form.get("allow_music") == "on",
-        approved_captions=list(dict.fromkeys(l.strip() for l in form.get("approved_captions", "").splitlines() if l.strip())),
+        approved_captions=approved_captions(form.get("approved_captions", "")),
         active=form.get("active", "on") == "on",
         ends_on=ends_on,
     )

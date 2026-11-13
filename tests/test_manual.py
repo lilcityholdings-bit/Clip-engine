@@ -345,3 +345,12 @@ def test_caption_is_not_doubled_when_the_campaign_dictates_it():
     cap = "first look at the Ring Drone @Ring #ad"
     assert platforms.caption_for({"title": cap, "description": cap}) == cap
     assert platforms.caption_for({"title": "T", "description": "D"}) == "T\n\nD"
+
+
+def test_bullets_pasted_from_a_google_doc_are_not_part_of_the_caption():
+    pasted = "● first look at the Ring Drone \U0001F440 @Ring #ad\n• Ring just announced the Ring Drone @Ring #ad\n  - this is the new Ring Drone from @Ring #ad\n\n"
+    assert campaigns.approved_captions(pasted) == [
+        "first look at the Ring Drone \U0001F440 @Ring #ad",
+        "Ring just announced the Ring Drone @Ring #ad",
+        "this is the new Ring Drone from @Ring #ad"]
+    assert campaigns.approved_captions("  a caption  \na caption\n") == ["a caption"]
