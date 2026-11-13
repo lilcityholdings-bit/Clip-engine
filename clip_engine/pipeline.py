@@ -289,6 +289,20 @@ def ready_to_post(conn: sqlite3.Connection) -> list[dict]:
     return list(clips.values())
 
 
+def scheduled_posts(conn: sqlite3.Connection) -> list[dict]:
+    """Approved clips the engine will post by itself, with the platform and when."""
+    rows = conn.execute(
+        "SELECT p.id, p.platform, p.scheduled_at, c.title, c.campaign_id FROM posts p JOIN clips c ON c.id = p.clip_id"
+        " WHERE p.status = 'queued' ORDER BY p.scheduled_at, p.id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def post_now(conn: sqlite3.Connection, post_id: int) -> None:
+    """Skip the wait: the next 5-minute check posts it."""
+    conn.execute("UPDATE posts SET scheduled_at = datetime('now') WHERE id = ? AND status = 'queued'", (post_id,))
+    conn.commit()
+
+
 def save_manual_post(conn: sqlite3.Connection, post_id: int, url: str) -> None:
     """Record the link of a clip you posted yourself; views are tracked from it."""
     url = url.strip()

@@ -139,3 +139,20 @@ def test_stale_running_status_reads_as_interrupted(tmp_path):
     old = (datetime.utcnow() - timedelta(hours=2)).isoformat()
     db.put(conn, "produce_status", json.dumps({"state": "running", "text": "x", "at": old}))
     assert pipeline.status(conn)["state"] == "failed" and "interrupted" in pipeline.status(conn)["text"]
+
+
+def test_automatic_posts_are_listed_and_can_be_sent_now(tmp_path):
+    from clip_engine import dashboard
+    settings = Settings(data_dir=tmp_path)
+    conn = db.connect(settings.db_path)
+    clip = conn.execute(
+        "INSERT INTO clips (source_identifier, start_sec, end_sec, title, description, tags, arms)"
+        " VALUES ('s', 0, 1, 'Ring first look', 'd', '[]', '{}')").lastrowid
+    post = conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'youtube', 'queued',"
+                        " datetime('now', '+9 hours'))", (clip,)).lastrowid
+    conn.commit()
+    page = dashboard._scheduled(conn, settings)
+    assert "Ring first look" in page and "posts automatically" in page and "Post now" in page
+    pipeline.post_now(conn, post)
+    assert "posting within 5 minutes" in dashboard._scheduled(conn, settings)
+    assert dashboard._scheduled(db.connect(tmp_path / "empty.db"), settings) == ""

@@ -8,6 +8,7 @@ POST /review/approve, /review/reject, /review/approve-all   decide on clips wait
 POST /manual/save, /manual/skip   record (or skip) a clip you posted yourself from your phone
 POST /settings/review, /settings/ramp, /settings/youtube-auto, /settings/youtube-test   switch review mode / gradual start on or off
 POST /settings/post-to  accounts new clips are made for
+POST /post/now   send one queued automatic post at the next check instead of its scheduled time
 POST /settings/youtube-disconnect   cancel the saved YouTube login at Google and forget it
 POST /campaigns/save   add or update a campaign from the form
 POST /campaigns/toggle pause or resume one campaign
@@ -111,6 +112,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 {start}
 {review}
 {ready}
+{scheduled}
 <section><div class="row">
 <div class="stat"><b>${earned}</b><span>estimated earnings</span></div>
 <div class="stat"><b>{views}</b><span>total views</span></div>
@@ -372,6 +374,30 @@ def _review(conn, settings: Settings) -> str:
             f'{"".join(cards)}{approve_all}</section>')
 
 
+def _scheduled(conn, settings: Settings) -> str:
+    """Clips the engine posts by itself (YouTube), when, and a button to send one now."""
+    posts = pipeline.scheduled_posts(conn)
+    if not posts:
+        return ""
+    e = html.escape
+    names = {c.id: c.name for c in campaigns.load(settings.data_dir)}
+    rows = []
+    for p in posts:
+        when = post_time_label(p["scheduled_at"])
+        name = PLATFORM_NAMES.get(p["platform"], p["platform"])
+        rows.append(
+            f'<div class="card"><b>{e(p["title"])}</b>'
+            f'<div class="muted">{e(name)} &middot; {e(names.get(p["campaign_id"], p["campaign_id"] or "archive"))}'
+            f' &middot; {"posting within 5 minutes" if when == "now" else "posts automatically " + e(when)}</div>'
+            + ('' if when == "now" else
+               f'<form method="post" action="/post/now" style="margin-top:6px"><input type="hidden" name="id" '
+               f'value="{p["id"]}"><button>Post now</button></form>')
+            + '</div>')
+    return (f'<section id="scheduled"><h2>Posting automatically ({len(posts)})</h2>'
+            f'<p class="muted">Nothing to do here. Each one goes out by itself at its time. Tap Post now to send it '
+            f'sooner.</p>{"".join(rows)}</section>')
+
+
 COPY_JS = """<script>
 function copyText(id, btn) {
   const el = document.getElementById(id);
@@ -599,6 +625,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
         start=_getting_started(conn, settings),
         review=_review(conn, settings),
         ready=_ready(conn, settings),
+        scheduled=_scheduled(conn, settings),
         settings_html=_settings(conn, settings),
         campaigns=_campaign_rows(settings),
         own_video=_own_video(conn, settings),
@@ -912,6 +939,8 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                             pipeline.save_manual_post(conn, post_id, form.get("url", [""])[0])
                         except ValueError as exc:
                             return self._page(error=str(exc))
+                elif self.path == "/post/now":
+                    pipeline.post_now(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/review/approve-all":
                     for c in pipeline.awaiting_review(conn):
                         pipeline.approve(conn, c["id"])
