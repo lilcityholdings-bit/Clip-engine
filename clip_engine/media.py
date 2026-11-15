@@ -296,6 +296,14 @@ def _segment(src: Path, out: Path, seconds: float, photo: bool, index: int, audi
           "-movflags", "+faststart", str(out)])
 
 
+def thumbnail(src: Path, out: Path, photo: bool) -> bytes:
+    """A small JPEG of a photo, or of the middle of a video, for Claude to look at."""
+    seek = [] if photo else ["-ss", f"{duration(src) / 2:.2f}"]
+    _run(["ffmpeg", "-y", "-v", "error", *seek, "-i", str(src), "-frames:v", "1",
+          "-vf", "scale=512:512:force_original_aspect_ratio=decrease", "-q:v", "5", str(out)])
+    return out.read_bytes()
+
+
 def assemble(pieces: list[Path], out: Path, work: Path) -> Path:
     """Join videos and photos, in the order given, into one 1080x1920 video of at most 58 seconds.
 

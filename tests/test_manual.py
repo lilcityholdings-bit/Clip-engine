@@ -86,8 +86,9 @@ def test_dashboard_card_appears_only_with_a_live_campaign(server, tmp_path):
     assert 'id="own-video"' in page and "Upload videos or photos from this phone" in page and "Pod Show" in page
 
 
-def test_dashboard_upload_and_link_routes(server, tmp_path):
+def test_dashboard_upload_and_link_routes(server, tmp_path, monkeypatch):
     base, conn = server
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     _campaign(tmp_path)
 
     def upload(query, body, password="s3cret"):
@@ -101,8 +102,10 @@ def test_dashboard_upload_and_link_routes(server, tmp_path):
         except urllib.error.HTTPError as err:
             return err.code, json.loads(err.read() or b"{}")
 
+    db.put(conn, "paused", "1")
     status, reply = upload("campaign=pod&name=ep1.mp4&title=Ep+1&creator=Host", b"video-bytes")
-    assert status == 200 and "uploaded" in reply["message"]
+    assert status == 200 and "uploaded" in reply["message"] and "nothing else to tap" in reply["message"]
+    assert db.get(db.connect(tmp_path / "clip_engine.db"), "paused") == "0"  # uploading resumes
     queued = manual.queue(db.connect(tmp_path / "clip_engine.db"))
     assert queued[0]["kind"] == "file" and queued[0]["title"] == "Ep 1" and queued[0]["creator"] == "Host"
     assert open(queued[0]["ref"], "rb").read() == b"video-bytes"
@@ -419,8 +422,9 @@ def test_assemble_builds_one_vertical_video_from_photos_and_a_video(tmp_path):
     assert not media.has_audio(photos) and 5.5 < media.duration(photos) < 6.5
 
 
-def test_dashboard_upload_batch_route_queues_one_project(server, tmp_path):
+def test_dashboard_upload_batch_route_queues_one_project(server, tmp_path, monkeypatch):
     base, _ = server
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     _campaign(tmp_path)
 
     def upload(query, body):
@@ -466,6 +470,9 @@ def test_produce_posts_a_combined_video_whole_with_the_approved_caption(tmp_path
         return out
     monkeypatch.setattr(media, "assemble", fake_assemble)
     monkeypatch.setattr(media, "duration", lambda p: 14.0)
+    monkeypatch.setattr(media, "thumbnail", lambda src, out, photo: b"jpeg")
+    from tests.test_core import _claude_returning
+    claude = _claude_returning({"order": [1, 0], "dropped": []})  # Claude opens on the video
     monkeypatch.setattr(media, "transcribe", lambda *a, **k: (_ for _ in ()).throw(AssertionError("transcribed")))
     monkeypatch.setattr(media, "plan_layout", lambda *a: (_ for _ in ()).throw(AssertionError("re-framed")))
     rendered = []
@@ -474,9 +481,10 @@ def test_produce_posts_a_combined_video_whole_with_the_approved_caption(tmp_path
         out.write_bytes(b"c"), out)[3])
     pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
     assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 1
-    assert built == [["a.jpg", "b.mp4"]]  # in upload order
+    assert built == [["b.mp4", "a.jpg"]]  # in the order Claude chose
     assert rendered == [(0.0, 14.0, "short", "blur")]  # the whole video, vertical, not re-framed
-    assert not claude.beta.messages.create.called
+    sent = claude.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert claude.beta.messages.create.call_count == 1 and sum(b["type"] == "image" for b in sent) == 2
     row = conn.execute("SELECT title, description FROM clips").fetchone()
     assert row["title"] == caps[0] == row["description"]
     left = {f.name for f in (tmp_path / "uploads").iterdir()}
@@ -500,3 +508,36 @@ def test_combined_video_without_approved_captions_uses_your_title_and_the_campai
     assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube")}, 2) == 1
     row = conn.execute("SELECT title, description FROM clips").fetchone()
     assert row["title"] == "Our drone" and "#pod" in row["description"] and "#ad" in row["description"].lower()
+
+
+def test_upload_without_a_claude_key_says_what_is_missing(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    conn = db.connect(tmp_path / "k.db")
+    message = dashboard.start_now(conn, __import__("clip_engine.config", fromlist=["Settings"]).Settings(data_dir=tmp_path),
+                                  "Video uploaded.")
+    assert "Claude API key" in message and db.get(conn, "run_now") is None
+
+
+def test_arrange_drops_unusable_pieces_and_falls_back_to_upload_order(tmp_path, monkeypatch):
+    from tests.test_core import _claude_returning
+    camp = campaigns.Campaign(id="r", name="Ring", program_url="https://w", rate_per_1k_views=1, sources=[])
+    files = [tmp_path / n for n in ("a.jpg", "b.jpg", "c.mp4")]
+    monkeypatch.setattr(media, "thumbnail", lambda src, out, photo: b"jpeg")
+    monkeypatch.setattr(media, "duration", lambda p: 8.0)
+    claude = _claude_returning({"order": [2, 0, 2, 9], "dropped": [{"piece": 1, "why": "blurry"}]})
+    assert pipeline.arrange(claude, files, camp, tmp_path / "w") == [files[2], files[0]]  # repeats and bad numbers ignored
+    assert pipeline.arrange(_claude_returning({"order": [], "dropped": []}), files, camp, tmp_path / "w") == files
+    broken = _claude_returning({})
+    broken.beta.messages.create.side_effect = RuntimeError("API down")
+    assert pipeline.arrange(broken, files, camp, tmp_path / "w") == files  # a video is still made
+
+
+def test_thumbnail_of_a_real_photo_and_video(tmp_path):
+    import subprocess
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1600x1200:d=1", "-frames:v", "1",
+                    str(tmp_path / "a.jpg")], check=True)
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=s=1280x720:d=2:r=24",
+                    str(tmp_path / "v.mp4")], check=True)
+    for src, photo in ((tmp_path / "a.jpg", True), (tmp_path / "v.mp4", False)):
+        data = media.thumbnail(src, tmp_path / f"t-{src.stem}.jpg", photo)
+        assert data[:2] == b"\xff\xd8" and media._dimensions(tmp_path / f"t-{src.stem}.jpg")[0] <= 512

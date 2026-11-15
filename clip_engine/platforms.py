@@ -39,13 +39,17 @@ def caption_for(clip: dict) -> str:
 class YouTubePublisher:
     name = "youtube"
 
-    def __init__(self, yt, daily_limit: int, on_private=None):
+    def __init__(self, yt, daily_limit: int, on_private=None, on_label_missing=None):
         self.yt = yt
         self.daily_limit = daily_limit
         self.on_private = on_private  # called when Google keeps an upload private
+        self.on_label_missing = on_label_missing  # called when a paid clip lacks the paid-promotion label
 
     def publish(self, clip: dict, path: Path, public_url: str) -> tuple[str, str]:
-        video_id = self.yt.upload(path, clip["title"], clip["description"], json.loads(clip["tags"]))
+        paid = bool(clip.get("campaign_id"))  # every campaign clip is a paid clip
+        video_id = self.yt.upload(path, clip["title"], clip["description"], json.loads(clip["tags"]), paid=paid)
+        if paid and self.on_label_missing and getattr(self.yt, "last_paid_label", None) is not True:
+            self.on_label_missing(video_id)
         wanted = getattr(self.yt.settings, "privacy_status", "public")
         if self.on_private and wanted != "private" and self.yt.last_privacy == "private":
             self.on_private(video_id)
@@ -337,7 +341,12 @@ def enabled(settings: Settings, conn: sqlite3.Connection, yt) -> dict:
             db.put(conn, "youtube_private_lock", video_id)
             log.warning("Google kept YouTube upload %s private; automatic YouTube posting switched off", video_id)
 
-        pubs["youtube"] = YouTubePublisher(yt, settings.max_uploads_per_day, on_private)
+        def on_label_missing(video_id: str) -> None:
+            """YouTube didn't confirm "Includes paid promotion": list the Short for the owner to tick in Studio."""
+            from .youtube import add_label_todo
+            add_label_todo(conn, video_id)
+
+        pubs["youtube"] = YouTubePublisher(yt, settings.max_uploads_per_day, on_private, on_label_missing)
     if os.environ.get("TIKTOK_CLIENT_KEY") and os.environ.get("TIKTOK_REFRESH_TOKEN"):
         pubs["tiktok"] = TikTokPublisher(
             conn, os.environ["TIKTOK_CLIENT_KEY"], os.environ.get("TIKTOK_CLIENT_SECRET", ""),

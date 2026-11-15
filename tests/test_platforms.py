@@ -192,7 +192,40 @@ def test_status_line_and_paid_promotion_reminder(server):
     conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at, url, posted_at)"
                  " VALUES (1, 'youtube', 'posted', datetime('now'), 'https://youtu.be/x', datetime('now'))")
     conn.commit()
-    assert "Includes paid promotion" in _get(base + "/", "s3cret").read().decode()
+    assert "Includes paid promotion" not in _get(base + "/", "s3cret").read().decode()  # YouTube took the label
+    youtube.add_label_todo(conn, "vid123")  # ...or it didn't: the Short is listed with its Studio link
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Includes paid promotion" in page and "studio.youtube.com/video/vid123/edit" in page and "1</b> YouTube label" in page
+    _get(base + "/labels/done", "s3cret", data=b"")
+    assert youtube.label_todo(conn) == []
+
+
+def test_paid_clips_ask_youtube_for_the_label_and_fall_back(tmp_path):
+    from googleapiclient.errors import HttpError
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    yt, inserts = _yt_with_response(tmp_path, {"id": "a", "status": {"privacyStatus": "public"},
+                                               "paidProductPlacementDetails": {"hasPaidProductPlacement": True}})
+    yt.upload(video, "t", "d", [], paid=True)
+    assert "paidProductPlacementDetails" in inserts[0]["part"] and yt.last_paid_label is True
+    yt.upload(video, "t", "d", [])  # not a paid clip: nothing asked
+    assert "paidProductPlacementDetails" not in inserts[1]["part"] and yt.last_paid_label is None
+
+    calls = []
+    def insert(**kw):
+        calls.append(kw)
+        if "paidProductPlacementDetails" in kw["part"]:
+            raise HttpError(MagicMock(status=400), b"bad part")
+        return _Req({"id": "b", "status": {"privacyStatus": "public"}})
+    yt.api.videos.return_value.insert.side_effect = insert
+    assert yt.upload(video, "t", "d", [], paid=True) == "b"  # refused: uploaded without it
+    assert len(calls) == 2 and yt.last_paid_label is False
+
+    missing = []
+    pub = platforms.YouTubePublisher(yt, 5, on_label_missing=missing.append)
+    pub.publish({"title": "t", "description": "d", "tags": "[]", "campaign_id": "ring"}, video, "")
+    pub.publish({"title": "t", "description": "d", "tags": "[]", "campaign_id": None}, video, "")
+    assert missing == ["b"]  # only the paid clip YouTube didn't label
 
 
 def test_dashboard_disabled_without_password(tmp_path):

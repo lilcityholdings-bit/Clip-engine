@@ -8,6 +8,7 @@ POST /review/approve, /review/reject, /review/approve-all   decide on clips wait
 POST /manual/save, /manual/skip   record (or skip) a clip you posted yourself from your phone
 POST /settings/review, /settings/ramp, /settings/youtube-auto, /settings/youtube-test   switch review mode / gradual start on or off
 POST /settings/post-to  accounts new clips are made for
+POST /labels/done   clear the list of YouTube Shorts waiting for the paid-promotion tick
 POST /post/now   send one queued automatic post at the next check instead of its scheduled time
 POST /settings/youtube-disconnect   cancel the saved YouTube login at Google and forget it
 POST /campaigns/save   add or update a campaign from the form
@@ -247,6 +248,9 @@ def _todo(conn, settings: Settings) -> str:
         items.append(f'<a class="button" href="#review"><b>{review}</b> clip{"s" if review > 1 else ""} to approve</a>')
     if to_post:
         items.append(f'<a class="button" href="#ready"><b>{to_post}</b> to post from your phone</a>')
+    labels = len(youtube.label_todo(conn))
+    if labels:
+        items.append(f'<a class="button" href="#labels"><b>{labels}</b> YouTube label{"s" if labels > 1 else ""} to tick</a>')
     if links:
         items.append(f'<a class="button" href="#links"><b>{links}</b> link{"s" if links > 1 else ""} to submit</a>')
     has_campaign = bool(campaigns.load(settings.data_dir))
@@ -259,6 +263,33 @@ def _todo(conn, settings: Settings) -> str:
     shortcuts.append('<a href="#settings">Settings</a>')
     return (f'<section id="todo"><div class="row">{head}</div>'
             f'<div class="muted" style="margin-top:8px;font-size:13px">Go to: {" &middot; ".join(shortcuts)}</div></section>')
+
+
+def start_now(conn, settings: Settings, first: str) -> str:
+    """After you hand over a video: start making clips straight away (resuming if paused) and say so,
+    or say why it can't start yet. `first` is what was saved, e.g. "Video uploaded."."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return f"{first} Clips start once your Claude API key is added (step 1 of Getting started)."
+    reason = pipeline.nothing_to_do(conn, settings)
+    if reason:
+        return f"{first} {reason}"
+    db.put(conn, "paused", "0")  # handing over a video means you want clips
+    db.put(conn, "run_now", "1")
+    return (f"{first} Making clips now, nothing else to tap. They appear at the top of this page in 5 to 20 "
+            "minutes; you can leave and come back.")
+
+
+def _label_todo(conn) -> str:
+    """YouTube Shorts where YouTube didn't confirm the paid-promotion label, each a link to its Studio page."""
+    todo = youtube.label_todo(conn)
+    if not todo:
+        return ""
+    links = "".join(f'<li>{_link(youtube.studio_link(v), "Open Short " + html.escape(v) + " in YouTube Studio")}</li>'
+                    for v in todo)
+    return (f'<div class="notice" id="labels"><b>Tick "Includes paid promotion" on {len(todo)} YouTube '
+            f'Short{"s" if len(todo) > 1 else ""}</b><p class="muted">YouTube didn\'t take the label automatically '
+            f'for these. Open each one, tap Show more (or Details), tick <b>Includes paid promotion</b>, and Save.</p>'
+            f'<ul>{links}</ul><form method="post" action="/labels/done"><button>Done, I ticked them</button></form></div>')
 
 
 def _status(conn) -> str:
@@ -292,7 +323,7 @@ def _own_video(conn, settings: Settings) -> str:
     return (
         '<section id="own-video"><h2>Add your own video</h2>'
         '<p class="muted">Some campaigns give you a video to download instead of a channel to watch. Upload it here, '
-        'or paste its link, and the engine clips it before anything else. Then tap Make clips now.</p>' + queue_html +
+        'or paste its link, and the engine starts clipping it straight away, before anything else.</p>' + queue_html +
         f'<details><summary>Upload videos or photos from this phone</summary>'
         f'<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">{common}'
         f'<label>Files <small>(videos and photos, up to {manual.MAX_UPLOAD_MB} MB each; pick several at once)</small></label>'
@@ -608,10 +639,8 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
     pending_html = _table(["Campaign", "Platform", "Link"],
                           [[e(p["campaign_id"]), e(p["platform"]), _link(p["url"], p["url"])] for p in pending],
                           "Nothing waiting.")
+    pending_html = _label_todo(conn) + pending_html
     if pending:
-        if any(p["platform"] == "youtube" for p in pending):
-            pending_html += ('<p class="muted">Paid campaign on YouTube: open YouTube Studio, Content, the Short, '
-                             'then tick <b>Includes paid promotion</b>. The engine can\'t set that label.</p>')
         pending_html += '<form method="post" action="/submitted" style="margin-top:10px"><button>Mark all submitted</button></form>'
     clips = conn.execute(
         "SELECT c.id, c.title, c.created_at, c.ai_score, c.campaign_id,"
@@ -957,6 +986,8 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                             pipeline.save_manual_post(conn, post_id, form.get("url", [""])[0])
                         except ValueError as exc:
                             return self._page(error=str(exc))
+                elif self.path == "/labels/done":
+                    youtube.clear_label_todo(conn)
                 elif self.path == "/post/now":
                     pipeline.post_now(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/review/approve-all":
@@ -998,8 +1029,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
             manual.add(conn, {"kind": "url", "ref": url, "campaign_id": form["campaign"],
                               "creator": manual.clean_text(form.get("creator", "")),
                               "title": manual.clean_text(form.get("title", ""))})
-            db.put(conn, "run_now", "1")
-            return self._redirect("/?" + urlencode({"notice": "Video added. Now tap Make clips now."}))
+            return self._redirect("/?" + urlencode({"notice": start_now(conn, settings, "Video added.")}))
 
         def _upload_video(self) -> None:
             """The video arrives as the raw request body, so a big file streams to disk, not memory."""
@@ -1033,19 +1063,18 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                             count = manual.finish_batch(conn, batch, {
                                 "campaign_id": query["campaign"], "creator": manual.clean_text(query.get("creator", "")),
                                 "title": manual.clean_text(query.get("title", ""))})
-                            db.put(conn, "run_now", "1")
-                            return reply(200, f"{count} file{'s' if count > 1 else ''} uploaded. They'll be made into "
-                                              "one video. Now tap Make clips now.")
+                            return reply(200, start_now(conn, settings, f"{count} file{'s' if count > 1 else ''} uploaded "
+                                                                        "and will be made into one video."))
                     except manual.UploadError as exc:
                         return reply(400, str(exc))
                     return reply(200, "File added.")
                 manual.add(conn, {"kind": "file", "ref": str(path), "campaign_id": query["campaign"],
                                   "creator": manual.clean_text(query.get("creator", "")),
                                   "title": manual.clean_text(query.get("title", "")) or Path(query["name"]).stem[:60]})
-                db.put(conn, "run_now", "1")
+                message = start_now(conn, settings, "Video uploaded.")
             finally:
                 conn.close()
-            reply(200, "Video uploaded. Now tap Make clips now.")
+            reply(200, message)
 
         def _campaign_action(self) -> None:
             raw = self._form()

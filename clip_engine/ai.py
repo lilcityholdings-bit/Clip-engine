@@ -28,7 +28,8 @@ class ClaudeRefused(RuntimeError):
     pass
 
 
-def _json_call(client: anthropic.Anthropic, prompt: str, schema: dict, effort: str) -> dict:
+def _json_call(client: anthropic.Anthropic, prompt: str | list, schema: dict, effort: str) -> dict:
+    """prompt: plain text, or a list of content blocks (text and images)."""
     response = client.beta.messages.create(
         model=MODEL,
         max_tokens=16000,
@@ -187,3 +188,42 @@ def pick_clips(
             valid.append(c)
     valid.sort(key=lambda c: c["score"], reverse=True)
     return valid[:count]
+
+
+ARRANGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "order": {"type": "array", "items": {"type": "integer"}},
+        "dropped": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"piece": {"type": "integer"}, "why": {"type": "string"}},
+            "required": ["piece", "why"], "additionalProperties": False}},
+    },
+    "required": ["order", "dropped"],
+    "additionalProperties": False,
+}
+
+
+def arrange_pieces(client: anthropic.Anthropic, pieces: list[tuple[str, bytes]], brief: str) -> dict:
+    """Look at one frame of each photo or video and decide the order for a short vertical video.
+
+    pieces: (label, JPEG bytes) in upload order. Returns {"order": [piece numbers to keep, in showing
+    order], "dropped": [{"piece", "why"}]}. Piece numbers start at 0.
+    """
+    import base64
+    content: list[dict] = [{"type": "text", "text": (
+        "You are editing one short vertical social video (YouTube Shorts / TikTok) from the pieces below, "
+        f"for this paid campaign: {brief}\n"
+        "Each piece is a photo or a video clip; you see one frame of each. Decide the order that tells the clearest, "
+        "most watchable story: open on the strongest, most eye-catching shot (the viewer decides in the first second), "
+        "group related shots, build to the product or payoff, and end on a clean shot. "
+        "Drop a piece only if it is clearly unusable: blurry, nearly black, an accidental shot, a near-duplicate of "
+        "another piece (keep the better one), or showing another app's watermark. Keep everything else.")}]
+    for i, (label, jpeg) in enumerate(pieces):
+        content.append({"type": "text", "text": f"Piece {i}: {label}"})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                     "data": base64.b64encode(jpeg).decode()}})
+    content.append({"type": "text", "text": (
+        "Reply with `order`: the piece numbers to keep, in the order to show them, each at most once; and "
+        "`dropped`: each piece left out with a short reason.")})
+    return _json_call(client, content, ARRANGE_SCHEMA, effort="low")

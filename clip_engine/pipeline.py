@@ -143,7 +143,7 @@ def campaign_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
 
 
 def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
-               music: list[str] | None = None) -> Job | None:
+               music: list[str] | None = None, claude: anthropic.Anthropic | None = None) -> Job | None:
     """The oldest video you handed over (uploaded or by link) whose campaign is still live."""
     by_id = campaigns.by_id(live)
     while (item := manual.pop(conn)) is not None:
@@ -155,7 +155,7 @@ def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
         whole = False
         try:
             if item["kind"] == "project":
-                src = _build_project(item, campaign)
+                src = _build_project(item, campaign, claude)
                 whole = True
             elif item["kind"] == "file":
                 path = Path(item["ref"])
@@ -183,14 +183,18 @@ def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
     return None
 
 
-def _build_project(item: dict, campaign: campaigns.Campaign) -> sources.Source:
-    """Join the files you uploaded together (videos and photos) into one vertical video."""
+def _build_project(item: dict, campaign: campaigns.Campaign,
+                   claude: anthropic.Anthropic | None = None) -> sources.Source:
+    """Join the files you uploaded together (videos and photos) into one vertical video,
+    in the order Claude thinks works best (or the upload order if Claude isn't available)."""
     files = [Path(f) for f in item["files"] if Path(f).exists()]
     if not files:
         raise FileNotFoundError("none of the uploaded files are left")
     stem = Path(files[0]).stem
     work = files[0].parent / f"build-{stem}"
     try:
+        if claude is not None and len(files) > 1:
+            files = arrange(claude, files, campaign, work)
         built = media.assemble(files, files[0].parent / f"{stem}-combined.mp4", work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -198,6 +202,29 @@ def _build_project(item: dict, campaign: campaigns.Campaign) -> sources.Source:
         identifier=f"upload:{stem}", title=item.get("title") or campaign.name,
         creator=item.get("creator") or campaign.name, license_url=campaign.program_url,
         video_url=str(built), duration=media.duration(built), page=campaign.program_url)
+
+
+def arrange(claude: anthropic.Anthropic, files: list[Path], campaign: campaigns.Campaign, work: Path) -> list[Path]:
+    """Claude looks at a frame of each file, picks the order, and leaves out unusable ones (blurry,
+    duplicate, watermarked). Any problem: keep the upload order, so a video is always made."""
+    try:
+        work.mkdir(parents=True, exist_ok=True)
+        pieces = []
+        for i, f in enumerate(files):
+            photo = manual.is_image(f)
+            label = "photo" if photo else f"video, {media.duration(f):.0f} seconds"
+            pieces.append((label, media.thumbnail(f, work / f"thumb{i}.jpg", photo)))
+        brief = "; ".join(x for x in (campaign.name, campaign.niche, campaign.rules) if x)
+        result = ai.arrange_pieces(claude, pieces, brief)
+        order = list(dict.fromkeys(i for i in result.get("order", []) if isinstance(i, int) and 0 <= i < len(files)))
+        if not order:
+            raise ValueError(f"no usable order in {result!r}")
+        for d in result.get("dropped", []):
+            log.info("left out piece %s: %s", d.get("piece"), d.get("why"))
+        return [files[i] for i in order]
+    except Exception:
+        log.exception("could not arrange the pieces; keeping the upload order")
+        return files
 
 
 # --- shared ----------------------------------------------------------------
@@ -434,7 +461,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
     library = media.music_library(settings.data_dir)
     tracks = sorted(library)
     if live:
-        job = manual_job(conn, live, tracks) or campaign_job(conn, live, tracks)
+        job = manual_job(conn, live, tracks, claude) or campaign_job(conn, live, tracks)
     else:
         job = archive_job(conn, claude, yt, tracks) if settings.archive_mode else None
     if not job:

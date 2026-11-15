@@ -1,5 +1,7 @@
 """YouTube Data API and Analytics API access for one channel."""
 import dataclasses
+import json
+import logging
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
@@ -9,10 +11,13 @@ import requests
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from . import db
 from .config import Settings
+
+log = logging.getLogger(__name__)
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
@@ -56,6 +61,26 @@ def revoke(token: str, http=None) -> bool:
     return (http or requests).post(REVOKE_URL, data={"token": token}, timeout=30).status_code == 200
 
 
+LABEL_TODO_KEY = "paid_label_todo"
+
+
+def label_todo(conn: sqlite3.Connection) -> list[str]:
+    """YouTube Shorts whose "Includes paid promotion" box still has to be ticked in Studio."""
+    return json.loads(db.get(conn, LABEL_TODO_KEY, "[]"))
+
+
+def add_label_todo(conn: sqlite3.Connection, video_id: str) -> None:
+    db.put(conn, LABEL_TODO_KEY, json.dumps(label_todo(conn) + [video_id]))
+
+
+def clear_label_todo(conn: sqlite3.Connection) -> None:
+    db.put(conn, LABEL_TODO_KEY, "[]")
+
+
+def studio_link(video_id: str) -> str:
+    return f"https://studio.youtube.com/video/{video_id}/edit"
+
+
 def stored_token(conn: sqlite3.Connection, settings: Settings) -> str:
     """The refresh token saved by the dashboard's Connect YouTube button, else the environment one."""
     return db.get(conn, "youtube_refresh_token") or settings.youtube_refresh_token
@@ -96,8 +121,13 @@ class YouTube:
         return [item["snippet"]["title"] for item in resp.get("items", [])]
 
     last_privacy: str | None = None  # privacy YouTube actually applied to the latest upload
+    last_paid_label: bool | None = None  # whether YouTube confirmed the "Includes paid promotion" label
 
-    def upload(self, path: Path, title: str, description: str, tags: list[str], privacy: str | None = None) -> str:
+    def upload(self, path: Path, title: str, description: str, tags: list[str], privacy: str | None = None,
+               paid: bool = False) -> str:
+        """Upload a video. paid=True also asks YouTube to show "Includes paid promotion" (paid campaign clips);
+        whether YouTube confirmed it is left in last_paid_label. If YouTube refuses that field, the video
+        is uploaded without it and the owner is reminded to tick it in Studio."""
         requested = privacy or self.settings.privacy_status
         body = {
             "snippet": {
@@ -113,13 +143,30 @@ class YouTube:
                 "containsSyntheticMedia": False,
             },
         }
+        self.last_paid_label = None
+        response = None
+        if paid:
+            labelled = {**body, "paidProductPlacementDetails": {"hasPaidProductPlacement": True}}
+            try:
+                response = self._insert(path, "snippet,status,paidProductPlacementDetails", labelled)
+            except HttpError as exc:
+                if getattr(exc.resp, "status", None) != 400:
+                    raise
+                log.warning("YouTube refused the paid-promotion label; uploading without it: %s", exc)
+            self.last_paid_label = bool(response and (response.get("paidProductPlacementDetails") or {})
+                                        .get("hasPaidProductPlacement"))
+        if response is None:
+            response = self._insert(path, "snippet,status", body)
+        self.last_privacy = (response.get("status") or {}).get("privacyStatus")
+        return response["id"]
+
+    def _insert(self, path: Path, part: str, body: dict) -> dict:
         media = MediaFileUpload(str(path), mimetype="video/mp4", chunksize=8 * 1024 * 1024, resumable=True)
-        request = self.api.videos().insert(part="snippet,status", body=body, media_body=media)
+        request = self.api.videos().insert(part=part, body=body, media_body=media)
         response = None
         while response is None:
             _, response = request.next_chunk()
-        self.last_privacy = (response.get("status") or {}).get("privacyStatus")
-        return response["id"]
+        return response
 
     def test_upload(self, workdir: Path) -> dict:
         """Upload a 3-second unlisted video to see whether Google keeps API uploads private.
