@@ -372,15 +372,19 @@ def test_short_videos_are_posted_whole_and_queued_videos_run_back_to_back(tmp_pa
 
 # --- several videos and photos made into one video -------------------------------------------
 
-def test_plan_pieces_fits_one_short():
-    assert media.plan_pieces([(True, 3), (False, 40), (True, 3)]) == [3.0, 40.0, 3.0]  # nothing is cut while it fits
-    assert media.plan_pieces([(False, 30)]) == [30.0]  # a single video keeps its whole length
-    assert media.plan_pieces([(False, 90)]) == [58.0]  # unless it is longer than a Short
-    assert media.plan_pieces([(False, 1.0)]) == [1.0]  # a very short video is used whole
-    many = media.plan_pieces([(True, 3)] * 30)  # 90s of photos: shortened, never below the minimum
-    assert sum(many) <= media.COMPILATION_MAX_SEC and all(x >= media.MIN_IMAGE_SEC for x in many)
-    mixed = media.plan_pieces([(False, 60)] * 10)  # 150s wanted: shrunk in proportion and the tail dropped if needed
-    assert sum(mixed) <= media.COMPILATION_MAX_SEC and len(mixed) <= 10
+def test_plan_pieces_lands_between_15_and_30_seconds_or_up_to_a_minute():
+    assert media.plan_pieces([(True, 3), (False, 20), (True, 3)]) == [3.0, 20.0, 3.0]  # nothing is cut while it fits
+    assert media.plan_pieces([(False, 25)]) == [25.0]  # a single video keeps its whole length
+    assert media.plan_pieces([(False, 90)]) == [30.0]  # the usual cap
+    assert media.plan_pieces([(False, 90)], budget=media.COMPILATION_MAX_SEC) == [59.0]  # the longer option, under a minute
+    over = media.plan_pieces([(True, 3), (False, 40), (True, 3)])  # 46s of material into 30s: shrunk, nothing dropped
+    assert len(over) == 3 and sum(over) <= 30.0 and over[1] > over[0]
+    many = media.plan_pieces([(True, 3)] * 30)  # 90s of photos: shortened, never below the minimum, the tail dropped
+    assert sum(many) <= 30.0 and all(x >= media.MIN_IMAGE_SEC for x in many)
+    assert sum(media.plan_pieces([(False, 60)] * 10)) <= 30.0
+    assert media.plan_pieces([(True, 3)] * 2) == [5.0, 5.0]  # too little: photos are held longer, up to 5s each
+    assert media.plan_pieces([(True, 3), (False, 4)]) == [5.0, 4.0]  # videos are never stretched
+    assert media.plan_pieces([(False, 6)]) == [6.0]  # a very short set stays short
 
 
 def test_photos_are_accepted_and_batches_become_one_project(tmp_path):
@@ -419,9 +423,9 @@ def test_assemble_builds_one_vertical_video_from_photos_and_a_video(tmp_path):
        str(tmp_path / "v.mp4"))
     out = media.assemble([tmp_path / "a.jpg", tmp_path / "v.mp4", tmp_path / "b.png"], tmp_path / "out.mp4", tmp_path / "w")
     assert media._dimensions(out) == (1080, 1920) and media.has_audio(out)
-    assert 9.5 < media.duration(out) < 10.5  # 3s photo + the whole 4s video + 3s photo
+    assert 13.5 < media.duration(out) < 14.5  # photos held to 5s each to get near 15s, plus the whole 4s video
     photos = media.assemble([tmp_path / "a.jpg", tmp_path / "b.png"], tmp_path / "p.mp4", tmp_path / "w2")
-    assert not media.has_audio(photos) and 5.5 < media.duration(photos) < 6.5
+    assert not media.has_audio(photos) and 9.5 < media.duration(photos) < 10.5
 
 
 def test_dashboard_upload_batch_route_queues_one_project(server, tmp_path, monkeypatch):
@@ -441,12 +445,13 @@ def test_dashboard_upload_batch_route_queues_one_project(server, tmp_path, monke
 
     assert upload("campaign=pod&name=a.jpg", b"photo")[0] == 400  # a photo alone can't be clipped
     assert upload("campaign=pod&name=a.jpg&batch=batch0001&last=", b"photo") == (200, {"message": "File added."})
+    assert manual.clean_length("60") == "60" and manual.clean_length("") == "30" and manual.clean_length("999") == "30"
     conn = db.connect(tmp_path / "clip_engine.db")
     assert manual.queue(conn) == []
-    status, reply = upload("campaign=pod&name=b.mp4&batch=batch0001&last=1&title=Drone", b"video")
+    status, reply = upload("campaign=pod&name=b.mp4&batch=batch0001&last=1&title=Drone&length=60", b"video")
     assert status == 200 and "2 files" in reply["message"] and "one video" in reply["message"]
     item = manual.queue(conn)[0]
-    assert item["kind"] == "project" and len(item["files"]) == 2 and item["title"] == "Drone"
+    assert item["kind"] == "project" and len(item["files"]) == 2 and item["title"] == "Drone" and item["length"] == "60"
     assert db.get(conn, "run_now") == "1"
 
 
@@ -463,11 +468,13 @@ def test_produce_posts_a_combined_video_whole_with_the_approved_caption(tmp_path
         f.parent.mkdir(exist_ok=True)
         f.write_bytes(b"piece")
         pieces.append(str(f))
-    manual.add(conn, {"kind": "project", "files": pieces, "campaign_id": "pod", "creator": "", "title": "Drone"})
-    built = []
+    manual.add(conn, {"kind": "project", "files": pieces, "campaign_id": "pod", "creator": "", "title": "Drone",
+                      "length": "60"})
+    built, budgets = [], []
 
-    def fake_assemble(files, out, work):
+    def fake_assemble(files, out, work, budget=30.0):
         built.append([f.name for f in files])
+        budgets.append(budget)
         out.write_bytes(b"combined")
         return out
     monkeypatch.setattr(media, "assemble", fake_assemble)
@@ -483,7 +490,7 @@ def test_produce_posts_a_combined_video_whole_with_the_approved_caption(tmp_path
         out.write_bytes(b"c"), out)[3])
     pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
     assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 1
-    assert built == [["b.mp4", "a.jpg"]]  # in the order Claude chose
+    assert built == [["b.mp4", "a.jpg"]] and budgets == [59.0]  # in the order Claude chose, for the one-minute option
     assert rendered == [(0.0, 14.0, "short", "blur")]  # the whole video, vertical, not re-framed
     sent = claude.beta.messages.create.call_args.kwargs["messages"][0]["content"]
     assert claude.beta.messages.create.call_count == 1 and sum(b["type"] == "image" for b in sent) == 2
@@ -503,7 +510,7 @@ def test_combined_video_without_approved_captions_uses_your_title_and_the_campai
     f.parent.mkdir(exist_ok=True)
     f.write_bytes(b"piece")
     manual.add(conn, {"kind": "project", "files": [str(f)], "campaign_id": "pod", "creator": "", "title": "Our drone"})
-    monkeypatch.setattr(media, "assemble", lambda files, out, work: (out.write_bytes(b"c"), out)[1])
+    monkeypatch.setattr(media, "assemble", lambda files, out, work, budget=30.0: (out.write_bytes(b"c"), out)[1])
     monkeypatch.setattr(media, "duration", lambda p: 6.0)
     monkeypatch.setattr(media, "render", lambda video_path, out, *a, **k: (
         out.parent.mkdir(parents=True, exist_ok=True), out.write_bytes(b"c"), out)[2])

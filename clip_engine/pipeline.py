@@ -192,10 +192,11 @@ def _build_project(item: dict, campaign: campaigns.Campaign,
         raise FileNotFoundError("none of the uploaded files are left")
     stem = Path(files[0]).stem
     work = files[0].parent / f"build-{stem}"
+    budget = media.COMPILATION_MAX_SEC if item.get("length") == "60" else media.COMPILATION_DEFAULT_SEC
     try:
         if claude is not None and len(files) > 1:
             files = arrange(claude, files, campaign, work)
-        built = media.assemble(files, files[0].parent / f"{stem}-combined.mp4", work)
+        built = media.assemble(files, files[0].parent / f"{stem}-combined.mp4", work, budget)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return sources.Source(

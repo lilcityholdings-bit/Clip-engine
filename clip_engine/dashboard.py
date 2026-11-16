@@ -203,7 +203,7 @@ function sendVideo(form, btn) {
   const next = () => {
     const file = files[i];
     const q = new URLSearchParams({campaign: form.campaign.value, creator: form.creator.value,
-                                   title: form.title.value, name: file.name,
+                                   title: form.title.value, length: form.length.value, name: file.name,
                                    batch: combine ? batch : '', last: i === files.length - 1 ? '1' : ''});
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/manual-video/upload?' + q.toString());
@@ -330,8 +330,11 @@ def _own_video(conn, settings: Settings) -> str:
         f'<input type="file" name="file" accept="video/*,image/*" multiple>'
         f'<div class="checks" style="flex-direction:column;align-items:flex-start;margin-top:8px">'
         f'<label><input type="radio" name="mode" value="combine" checked> Make <b>one video</b> from all of them, '
-        f'in the order picked (photos zoom slowly; up to 58 seconds)</label>'
+        f'in the order picked (photos zoom slowly)</label>'
         f'<label><input type="radio" name="mode" value="each"> Clip <b>each video</b> separately (videos only)</label></div>'
+        f'<label style="margin-top:8px">Length of the one video</label>'
+        f'<select name="length" style="width:100%;font:inherit;padding:9px"><option value="30">15 to 30 seconds (best)</option>'
+        f'<option value="60">Up to 60 seconds</option></select>'
         f'<div class="muted status" style="margin:6px 0"></div>'
         f'<button class="primary" type="submit">Upload</button></form></details>'
         f'<details style="margin-top:10px"><summary>Paste a link instead</summary>'
@@ -1077,7 +1080,8 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                         if query.get("last") == "1":
                             count = manual.finish_batch(conn, batch, {
                                 "campaign_id": query["campaign"], "creator": manual.clean_text(query.get("creator", "")),
-                                "title": manual.clean_text(query.get("title", ""))})
+                                "title": manual.clean_text(query.get("title", "")),
+                                "length": manual.clean_length(query.get("length", ""))})
                             return reply(200, start_now(conn, settings, f"{count} file{'s' if count > 1 else ''} uploaded "
                                                                         "and will be made into one video."))
                     except manual.UploadError as exc:

@@ -150,6 +150,11 @@ def add_to_batch(conn: sqlite3.Connection, batch_id: str, path: Path) -> int:
     return len(batch["files"])
 
 
+def clean_length(value: str) -> str:
+    """The length chosen for a combined video: "60" (up to a minute) or the default "30" (15 to 30 seconds)."""
+    return "60" if (value or "").strip() == "60" else "30"
+
+
 def finish_batch(conn: sqlite3.Connection, batch_id: str, item: dict) -> int:
     """Queue the batch's files, in the order they were uploaded, as one video to build. Returns the file count."""
     batches = _batches(conn)

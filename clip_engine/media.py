@@ -246,24 +246,35 @@ def render(video: Path, out: Path, start: float, end: float, fmt: str, captions:
 
 IMAGE_SEC = 3.0        # each photo is on screen this long (a slow zoom keeps it moving)
 MIN_IMAGE_SEC = 1.5
+MAX_IMAGE_SEC = 5.0    # photos are held up to this long when there is too little material for a 15 second video
 MIN_VIDEO_SEC = 2.0
-COMPILATION_MAX_SEC = 58.0  # the finished video must stay a Short
+COMPILATION_MIN_SEC = 15.0      # a combined video should not be shorter than this if the material allows
+COMPILATION_DEFAULT_SEC = 30.0  # the usual cap: 15 to 30 seconds
+COMPILATION_MAX_SEC = 59.0      # the longest option: still under a minute and a Short
 
 
-def plan_pieces(pieces: list[tuple[bool, float]], budget: float = COMPILATION_MAX_SEC) -> list[float]:
-    """Seconds to use from each (is_photo, length) piece so the whole fits in one Short.
+def plan_pieces(pieces: list[tuple[bool, float]], budget: float = COMPILATION_DEFAULT_SEC,
+                floor: float = COMPILATION_MIN_SEC) -> list[float]:
+    """Seconds to use from each (is_photo, length) piece so the video lands between `floor` and `budget`.
 
-    Photos get IMAGE_SEC and videos all of their length, so nothing is cut while it fits. When the total is
-    over the budget, everything is shortened in proportion (never below a minimum), videos from their start,
-    and if it still doesn't fit, the last pieces are dropped.
+    Photos get IMAGE_SEC and videos all of their length, so nothing is cut while it fits. Over the budget,
+    everything is shortened in proportion (never below a minimum), videos from their start, and if it still
+    doesn't fit the last pieces are dropped. Under the floor, photos are held longer (up to MAX_IMAGE_SEC) to
+    reach it; videos can't be stretched, so a very short set stays short.
     """
     want = [IMAGE_SEC if photo else min(length, budget) for photo, length in pieces]
     if sum(want) > budget:
         scale = budget / sum(want)
-        want = [max(MIN_IMAGE_SEC, round(w * scale, 2)) if photo else min(length, max(MIN_VIDEO_SEC, round(w * scale, 2)))
-                for (photo, length), w in zip(pieces, want)]
+        shrunk = [int(w * scale * 100) / 100 for w in want]  # rounded down, so the total never creeps over
+        want = [max(MIN_IMAGE_SEC, w) if photo else min(length, max(MIN_VIDEO_SEC, w))
+                for (photo, length), w in zip(pieces, shrunk)]
         while sum(want) > budget and len(want) > 1:
             want.pop()
+    elif sum(want) < floor:
+        held = sum(w for (photo, _), w in zip(pieces, want) if photo)
+        if held:
+            grow = min(MAX_IMAGE_SEC / IMAGE_SEC, 1 + (floor - sum(want)) / held)
+            want = [round(w * grow, 2) if photo else w for (photo, _), w in zip(pieces, want)]
     return want
 
 
@@ -303,8 +314,8 @@ def thumbnail(src: Path, out: Path, photo: bool) -> bytes:
     return out.read_bytes()
 
 
-def assemble(pieces: list[Path], out: Path, work: Path) -> Path:
-    """Join videos and photos, in the order given, into one 1080x1920 video of at most 58 seconds.
+def assemble(pieces: list[Path], out: Path, work: Path, budget: float = COMPILATION_DEFAULT_SEC) -> Path:
+    """Join videos and photos, in the order given, into one 1080x1920 video of 15 to `budget` seconds (30 or 59).
 
     Every piece is framed the same way (fitted over a blurred copy of itself), photos slowly zoom,
     and the pieces are cut together back to back. The soundtrack is the videos' own sound, with
@@ -314,7 +325,7 @@ def assemble(pieces: list[Path], out: Path, work: Path) -> Path:
     work.mkdir(parents=True, exist_ok=True)
     kinds = [manual.is_image(p) for p in pieces]
     lengths = [IMAGE_SEC if photo else duration(p) for p, photo in zip(pieces, kinds)]
-    plan = plan_pieces(list(zip(kinds, lengths)))
+    plan = plan_pieces(list(zip(kinds, lengths)), budget)
     pieces, kinds = pieces[:len(plan)], kinds[:len(plan)]
     audio = any(not photo and has_audio(p) for p, photo in zip(pieces, kinds))
     segments = []
