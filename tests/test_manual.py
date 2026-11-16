@@ -624,8 +624,8 @@ def test_hand_posting_tips_follow_the_campaign_rules():
     assert "trending sound" in dashboard.app_tip("tiktok", None) and dashboard.app_tip("youtube", sega).startswith("YouTube app")
 
 
-def test_one_upload_makes_at_most_five_clips(tmp_path, monkeypatch):
-    assert pipeline.MAX_CLIPS_PER_UPLOAD == 5
+def test_one_upload_makes_two_to_four_clips():
+    assert pipeline.MIN_CLIPS_PER_UPLOAD == 2 and pipeline.MAX_CLIPS_PER_UPLOAD == 4 == manual.MAX_VIDEOS
 
 
 # --- several different videos from one set of files ---------------------------------------------------------
@@ -884,3 +884,51 @@ def test_clips_keep_clear_of_the_skipped_start_and_end(tmp_path, monkeypatch):
 def test_a_clip_left_too_short_by_the_skip_is_dropped(tmp_path, monkeypatch):
     rendered = _trim_run(tmp_path, monkeypatch, {"trim_start": 38.0}, [(0, 40, "Almost all of it is skipped")])
     assert rendered == []  # only 2 seconds would be left
+
+
+# --- two to four clips from one upload, posted through the day --------------------------------------------
+
+def test_pick_clips_gives_at_least_the_wanted_number_by_taking_the_next_best():
+    from clip_engine import ai
+    from tests.test_core import _claude_returning
+    clips = [{"start": 100 * i, "end": 100 * i + 30, "title": f"t{i}", "description": "d", "tags": [], "hook_text": "h",
+              "hashtags": [], "score": sc, "why": ""} for i, sc in enumerate([8, 5, 4, 2])]
+    seg = [{"start": 0, "end": 5, "text": "hi"}]
+    kw = dict(source_title="T", fmt="short", min_sec=20, max_sec=58, title_style="question", count=4)
+    assert [c["score"] for c in ai.pick_clips(_claude_returning({"clips": clips}), seg, **kw)] == [8]  # strong ones only
+    client = _claude_returning({"clips": clips})
+    assert [c["score"] for c in ai.pick_clips(client, seg, want=2, **kw)] == [8, 5]  # the next best fills in
+    assert [c["score"] for c in ai.pick_clips(_claude_returning({"clips": clips}), seg, want=3, **kw)] == [8, 5, 4]
+    assert "at least 2 different moments" in client.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+    plain = _claude_returning({"clips": clips})
+    ai.pick_clips(plain, seg, **kw)
+    assert "at least" not in plain.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+
+
+def test_slot_at_spreads_a_batch_through_the_day_and_skips_the_night():
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    from clip_engine.platforms import slot_at
+    et = ZoneInfo("America/New_York")
+    first = datetime(2026, 11, 17, 14, 0, tzinfo=timezone.utc)  # 9am Eastern
+    assert [slot_at(first, i).astimezone(et).hour for i in range(4)] == [9, 12, 15, 18]
+    late = datetime(2026, 11, 17, 1, 0, tzinfo=timezone.utc)  # 8pm Eastern the evening before
+    got = [slot_at(late, i).astimezone(et) for i in range(3)]
+    assert got[0].hour == 20 and (got[1].day, got[1].hour) == (got[0].day + 1, 9) and got[2].hour == 12  # 11pm waits for 9am
+
+
+def test_an_upload_makes_distinct_clips_that_post_three_hours_apart(tmp_path, monkeypatch):
+    from datetime import datetime
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    titles = ["Heismay steps into the light", "A quiet look at the city", "The party gathers at night"]
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, titles)
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None,
+                            {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}, 2) == 3
+    asked = claude.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "at least 2 different moments (up to 4)" in asked  # an uploaded video is asked for 2 to 4 clips
+    rows = conn.execute("SELECT scheduled_at FROM posts WHERE platform = 'youtube' ORDER BY clip_id").fetchall()
+    times = [datetime.fromisoformat(r["scheduled_at"]) for r in rows]
+    gaps = [(b - a).total_seconds() / 3600 for a, b in zip(times, times[1:])]
+    assert len(times) == 3 and all(2.9 <= g <= 24 for g in gaps) and times == sorted(times)

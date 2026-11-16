@@ -16,6 +16,7 @@ import sqlite3
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -368,6 +369,21 @@ def enabled(settings: Settings, conn: sqlite3.Connection, yt) -> dict:
     for platform in ALL_PLATFORMS:
         pubs.setdefault(platform, ManualPublisher(platform))
     return pubs
+
+
+def slot_at(first: datetime, index: int, gap_hours: float = 3.0) -> datetime:
+    """The posting time of the index-th clip of a batch: the first at `first`, each next `gap_hours` later, so a
+    batch goes out through the day. A time that would fall between 11pm and 8am Eastern waits for 9am."""
+    at = first
+    for _ in range(index):
+        at += timedelta(hours=gap_hours)
+        local = at.astimezone(ZoneInfo("America/New_York"))
+        if local.hour >= 23 or local.hour < 8:
+            morning = local.replace(hour=9, minute=0, second=0, microsecond=0)
+            if local.hour >= 23:
+                morning += timedelta(days=1)
+            at = morning.astimezone(timezone.utc)
+    return at
 
 
 def next_slot(hour_utc: int, now: datetime | None = None) -> datetime:

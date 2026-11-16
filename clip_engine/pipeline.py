@@ -21,7 +21,7 @@ from . import ai, campaigns, db, manual, media, moments, policy, sources, strate
 from .config import Settings
 from .db import clips_today, posts_today
 from .layout import Layout
-from .platforms import ALL_PLATFORMS, PublishError, is_manual, next_slot
+from .platforms import ALL_PLATFORMS, PublishError, is_manual, next_slot, slot_at
 from .youtube import YouTube
 
 log = logging.getLogger(__name__)
@@ -473,7 +473,8 @@ def snap_to_words(clip: dict, words: list[dict]) -> dict:
 
 MAX_UPLOAD_ATTEMPTS = 3
 MIN_TRIMMED_CLIP_SEC = 5.0  # a clip left shorter than this once a campaign's skipped start and end are cut is dropped
-MAX_CLIPS_PER_UPLOAD = 5  # campaigns count the same footage posted more than 5 times as spam
+MAX_CLIPS_PER_UPLOAD = 4  # up to this many clips from one upload (campaigns count the same footage posted more than 5 times as spam)
+MIN_CLIPS_PER_UPLOAD = 2  # and at least this many when the video has the material, so there is something to post through the day
 STALE_STATUS_MINUTES = 45
 
 
@@ -547,7 +548,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                     "upload." if live else "Add a campaign first.")
         return 0
     if job.item:
-        remaining = min(left_today, MAX_CLIPS_PER_UPLOAD)  # a video you handed over is used once, so take today's clips from it, up to 5
+        remaining = min(left_today, MAX_CLIPS_PER_UPLOAD)  # a video you handed over is used once, so take today's clips from it, up to 4
     src, arms, campaign = job.src, job.arms, job.campaign
     log.info("plan %s using %s", arms, src.identifier)
 
@@ -569,7 +570,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
     )
     conn.commit()
 
-    slot = next_slot(int(arms["post_hour"])).strftime("%Y-%m-%d %H:%M:%S")
+    first_slot = next_slot(int(arms["post_hour"]))  # the clips of one run go out through the day, 3 hours apart
     queued = 0
     finished = False
     try:
@@ -604,6 +605,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                 track_record=track_record(conn),
                 recent_titles=recent,
                 trends=trends.as_prompt(trends.brief(conn, claude, niche_of(campaign, arms), settings.trend_region)),
+                want=min(MIN_CLIPS_PER_UPLOAD, remaining) if job.item else 0,
             )
         elif campaign and campaign.approved_captions:
             # Nothing to read, but the caption is dictated anyway: cut the picture along its shot changes.
@@ -650,6 +652,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                 description = campaigns.disclosed_caption(plain, tags, campaign.disclosure_line)
             if arms["format"] == "short":
                 clip["end"] = min(clip["end"], clip["start"] + 59)
+            slot = slot_at(first_slot, queued).strftime("%Y-%m-%d %H:%M:%S")
             token = secrets.token_hex(16)
             if job.whole:
                 frame = Layout("blur")

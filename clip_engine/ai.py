@@ -9,6 +9,8 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 # Clips Claude scores below this are never posted: weak clips drag down the whole channel.
 MIN_CLIP_SCORE = 6
+# When the owner needs a minimum number of clips from one video, the next best moments can fill in down to this score.
+MIN_SPARE_SCORE = 4
 
 EVERGREEN_TOPICS = [
     "space", "history", "science", "technology", "psychology",
@@ -95,8 +97,12 @@ def pick_clips(
     track_record: str = "",
     trends: str = "",
     recent_titles: list[str] | None = None,
+    want: int = 0,
 ) -> list[dict]:
     """Choose the most watchable self-contained moments and write metadata for them.
+
+    want: when the owner needs at least this many clips from the video (to post through the day), Claude is told
+    to return that many even if the extra ones are weaker, down to MIN_SPARE_SCORE.
 
     transcript: [{"start": float, "end": float, "text": str}, ...]
     """
@@ -152,6 +158,13 @@ def pick_clips(
         "shares it. Be harsh: 5 is an average clip, 8+ is rare. Only return moments that "
         "are genuinely strong; returning fewer clips is better than weak ones."
     )
+    want = min(want, count)
+    if want > 1:
+        prompt += (
+            f"\n\nThe owner will post these through the day, so return at least {want} different moments (up to "
+            f"{count}): after the strongest, take the next best ones even if they score lower, as long as they are "
+            "still worth posting and don't overlap. This overrides the earlier line about returning fewer clips."
+        )
     if trends:
         prompt += (
             "\n\nWhat's trending right now:\n" + trends + "\n"
@@ -179,14 +192,20 @@ def pick_clips(
     if rules:
         prompt += f"\n\nThe creator's rules for clips (must follow): {rules}"
     clips = _json_call(client, prompt, schema, effort="high")["clips"]
-    valid = []
+    valid, spare = [], []
     for c in clips:
         length = c["end"] - c["start"]
-        if min_sec - 3 <= length <= max_sec + 3 and c["start"] >= 0 and c["score"] >= MIN_CLIP_SCORE:
+        if min_sec - 3 <= length <= max_sec + 3 and c["start"] >= 0:
             if fmt == "short":
                 c["end"] = min(c["end"], c["start"] + 59)
-            valid.append(c)
+            if c["score"] >= MIN_CLIP_SCORE:
+                valid.append(c)
+            elif c["score"] >= MIN_SPARE_SCORE:
+                spare.append(c)
     valid.sort(key=lambda c: c["score"], reverse=True)
+    if len(valid) < want:
+        spare.sort(key=lambda c: c["score"], reverse=True)
+        valid += spare[: want - len(valid)]
     return valid[:count]
 
 
