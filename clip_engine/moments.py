@@ -53,6 +53,21 @@ def same_window(clip: dict, segments: list[dict]) -> bool:
     return bool(inside) and len({s.get("window", 0) for s in inside}) == 1
 
 
+OVERLAP_TOLERANCE = 0.5  # seconds two clips of the same video may share before they count as the same footage
+
+
+def overlap(a, b) -> float:
+    """Seconds two (start, end) spans, or clips with "start" and "end", have in common."""
+    a0, a1 = (a["start"], a["end"]) if isinstance(a, dict) else a
+    b0, b1 = (b["start"], b["end"]) if isinstance(b, dict) else b
+    return max(0.0, min(a1, b1) - max(a0, b0))
+
+
+def is_distinct(span, taken) -> bool:
+    """True if the clip shares no footage (beyond a split second) with any already chosen."""
+    return all(overlap(span, t) <= OVERLAP_TOLERANCE for t in taken)
+
+
 MIN_SPEECH_WORDS = 20      # fewer than this and the video is treated as having no speech to clip by
 VISUAL_MIN_SEC = 5         # shortest clip when cutting by picture alone (short product videos are posted whole)
 

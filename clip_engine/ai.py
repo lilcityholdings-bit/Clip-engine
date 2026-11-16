@@ -3,6 +3,8 @@ import json
 
 import anthropic
 
+from . import moments
+
 MODEL = "claude-opus-5-5"
 # Re-run a declined request on Anthropic's recommended fallback model.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -202,11 +204,19 @@ def pick_clips(
                 valid.append(c)
             elif c["score"] >= MIN_SPARE_SCORE:
                 spare.append(c)
+    # Every clip must be different footage: take the best first and skip any that overlaps one already taken.
     valid.sort(key=lambda c: c["score"], reverse=True)
-    if len(valid) < want:
-        spare.sort(key=lambda c: c["score"], reverse=True)
-        valid += spare[: want - len(valid)]
-    return valid[:count]
+    kept: list[dict] = []
+    for c in valid:
+        if moments.is_distinct(c, kept):
+            kept.append(c)
+    spare.sort(key=lambda c: c["score"], reverse=True)
+    for c in spare:
+        if len(kept) >= want:
+            break
+        if moments.is_distinct(c, kept):
+            kept.append(c)
+    return kept[:count]
 
 
 ARRANGE_SCHEMA = {

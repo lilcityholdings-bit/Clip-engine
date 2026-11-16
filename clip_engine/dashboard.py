@@ -10,6 +10,7 @@ POST /settings/review, /settings/ramp, /settings/youtube-auto, /settings/youtube
 POST /settings/post-to  accounts new clips are made for
 POST /labels/done   clear the list of YouTube Shorts waiting for the paid-promotion tick
 POST /repost   post a recent campaign clip again on one account
+POST /post/schedule   set the time an automatic (YouTube) post goes out
 POST /post/now   send one queued automatic post at the next check instead of its scheduled time
 POST /settings/youtube-disconnect   cancel the saved YouTube login at Google and forget it
 POST /campaigns/save   add or update a campaign from the form
@@ -417,6 +418,7 @@ def _review(conn, settings: Settings) -> str:
     waiting = pipeline.awaiting_review(conn)
     if not waiting:
         return ""
+    auto = pipeline.auto_platforms(conn)
     e = html.escape
     names = {c.id: c.name for c in campaigns.load(settings.data_dir)}
     cards = []
@@ -430,6 +432,9 @@ def _review(conn, settings: Settings) -> str:
             f'<div class="desc">{e(c["description"])}</div>'
             f'<form method="post" action="/review/approve" style="margin-top:8px"><input type="hidden" name="id" '
             f'value="{c["id"]}"><input type="hidden" name="choose" value="1"><div class="checks"><b>Post to:</b> {_platform_checks(c["platforms"].split(", "))}</div>'
+            + "".join(f'<label>{e(PLATFORM_NAMES.get(p, p))} posts at <small>(Eastern time)</small></label>'
+                      + _time_box("at", c["scheduled_at"]) for p in c["platforms"].split(", ") if p in auto)
+            +
             f'<div class="row" style="margin-top:8px"><button class="primary">Approve</button></div></form>'
             f'<div class="row" style="margin-top:8px">'
             f'<form class="inline" method="post" action="/review/reject"><input type="hidden" name="id" '
@@ -439,6 +444,18 @@ def _review(conn, settings: Settings) -> str:
     return (f'<section id="review"><h2>Waiting for your approval ({len(waiting)})</h2>'
             f'<p class="muted">Nothing posts until you approve it. Approved clips go out at their scheduled time.</p>'
             f'{"".join(cards)}{approve_all}</section>')
+
+
+def local_input(scheduled_at: str | None, now: datetime | None = None) -> str:
+    """A UTC timestamp from the database as the Eastern-time value a date-time box wants ("2026-11-17T15:30")."""
+    now = now or datetime.now(timezone.utc)
+    when = datetime.fromisoformat(scheduled_at).replace(tzinfo=timezone.utc) if scheduled_at else now
+    return max(when, now).astimezone(ZoneInfo(pipeline.LOCAL_ZONE)).strftime("%Y-%m-%dT%H:%M")
+
+
+def _time_box(name: str, scheduled_at: str | None) -> str:
+    return (f'<input type="datetime-local" name="{name}" value="{local_input(scheduled_at)}" required '
+            f'style="font:inherit;padding:9px">')
 
 
 def _scheduled(conn, settings: Settings) -> str:
@@ -456,13 +473,16 @@ def _scheduled(conn, settings: Settings) -> str:
             f'<div class="card"><b>{e(p["title"])}</b>'
             f'<div class="muted">{e(name)} &middot; {e(names.get(p["campaign_id"], p["campaign_id"] or "archive"))}'
             f' &middot; {"posting within 5 minutes" if when == "now" else "posts automatically " + e(when)}</div>'
+            + f'<form method="post" action="/post/schedule" style="margin-top:6px"><input type="hidden" name="id" '
+              f'value="{p["id"]}"><label>{e(name)} posts at <small>(Eastern time)</small></label>'
+              f'<div class="row">{_time_box("at", p["scheduled_at"])}<button class="primary">Set time</button></div></form>'
             + ('' if when == "now" else
                f'<form method="post" action="/post/now" style="margin-top:6px"><input type="hidden" name="id" '
                f'value="{p["id"]}"><button>Post now</button></form>')
             + '</div>')
     return (f'<section id="scheduled"><h2>Posting automatically ({len(posts)})</h2>'
-            f'<p class="muted">Nothing to do here. Each one goes out by itself at its time. Tap Post now to send it '
-            f'sooner.</p>{"".join(rows)}</section>')
+            f'<p class="muted">Each one goes out by itself at the time shown. Change the time with Set time, or tap Post '
+            f'now to send it sooner.</p>{"".join(rows)}</section>')
 
 
 def _repost(conn, settings: Settings) -> str:
@@ -1021,7 +1041,23 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     chosen = form.get("platforms", []) if "choose" in form else None
                     if chosen == []:
                         return self._page(error="Tick at least one account to post to, or tap Reject.")
-                    pipeline.approve(conn, clip_id, chosen)
+                    at = None
+                    if form.get("at", [""])[0]:
+                        try:
+                            at = pipeline.parse_local_time(form["at"][0])
+                        except ValueError as exc:
+                            return self._page(error=str(exc))
+                    pipeline.approve(conn, clip_id, chosen, at)
+                elif self.path == "/post/schedule":
+                    form = self._form()
+                    try:
+                        when = pipeline.parse_local_time(form.get("at", [""])[0])
+                    except ValueError as exc:
+                        return self._page(error=str(exc))
+                    pipeline.reschedule(conn, int(form.get("id", ["0"])[0] or 0), when)
+                    label = post_time_label(when)
+                    return self._redirect("/?" + urlencode({"notice": (
+                        "It will post within 5 minutes." if label == "now" else f"It will post at {label}.")}) + "#scheduled")
                 elif self.path == "/review/reject":
                     pipeline.reject(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/manual-video/link":

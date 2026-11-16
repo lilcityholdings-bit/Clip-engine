@@ -12,7 +12,8 @@ import secrets
 import shutil
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import anthropic
@@ -364,7 +365,8 @@ def review_mode(conn: sqlite3.Connection) -> bool:
 def awaiting_review(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
         "SELECT c.id, c.title, c.description, c.campaign_id, c.media_token, c.ai_score, c.hook_text,"
-        " c.end_sec - c.start_sec AS seconds, GROUP_CONCAT(p.platform, ', ') AS platforms"
+        " c.end_sec - c.start_sec AS seconds, GROUP_CONCAT(p.platform, ', ') AS platforms,"
+        " MIN(p.scheduled_at) AS scheduled_at"
         " FROM clips c JOIN posts p ON p.clip_id = c.id WHERE p.status = 'review'"
         " GROUP BY c.id ORDER BY c.id").fetchall()
     return [dict(r) for r in rows]
@@ -386,7 +388,31 @@ def set_post_to(conn: sqlite3.Connection, chosen: list[str]) -> None:
     db.put(conn, "post_to", ",".join(p for p in ALL_PLATFORMS if p in chosen))
 
 
-def approve(conn: sqlite3.Connection, clip_id: int, only: list[str] | None = None) -> None:
+LOCAL_ZONE = "America/New_York"
+
+
+def parse_local_time(value: str, now: datetime | None = None) -> str:
+    """A time picked on the dashboard (Eastern time, "2026-11-17T15:30") as the UTC text the database keeps.
+    A time already past means now; more than 30 days ahead is refused."""
+    try:
+        picked = datetime.strptime((value or "").strip(), "%Y-%m-%dT%H:%M")
+    except ValueError:
+        raise ValueError("Pick a date and a time.") from None
+    now = now or datetime.now(timezone.utc)
+    when = picked.replace(tzinfo=ZoneInfo(LOCAL_ZONE)).astimezone(timezone.utc)
+    if when > now + timedelta(days=30):
+        raise ValueError("Pick a time within the next 30 days.")
+    return max(when, now).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def reschedule(conn: sqlite3.Connection, post_id: int, when: str) -> None:
+    """Change the posting time of a post that hasn't gone out. `when` is UTC text from parse_local_time."""
+    conn.execute("UPDATE posts SET scheduled_at = ? WHERE id = ? AND status IN ('review', 'queued', 'ready')",
+                 (when, post_id))
+    conn.commit()
+
+
+def approve(conn: sqlite3.Connection, clip_id: int, only: list[str] | None = None, at: str | None = None) -> None:
     """Approve a reviewed clip, on every platform it was made for or only those in `only` (the
     rest are skipped). Automatic platforms are queued (keeping the scheduled slot if it's still
     ahead); phone-posted platforms move to "Ready to post"."""
@@ -395,6 +421,8 @@ def approve(conn: sqlite3.Connection, clip_id: int, only: list[str] | None = Non
                                           (clip_id,)).fetchall():
         if only is not None and platform not in only:
             conn.execute("UPDATE posts SET status = 'skipped' WHERE id = ?", (post_id,))
+        elif platform in auto and at:
+            conn.execute("UPDATE posts SET status = 'queued', scheduled_at = ? WHERE id = ?", (at, post_id))
         elif platform in auto:
             conn.execute("UPDATE posts SET status = 'queued', scheduled_at = MAX(scheduled_at, datetime('now'))"
                          " WHERE id = ?", (post_id,))
@@ -619,6 +647,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                         "footage without talking, add the campaign's approved captions and upload it again.")
             finished = True
             return 0
+        taken: list[tuple[float, float]] = []  # the footage of the clips made so far: each must be different
         for i, clip in enumerate(clips):
             if not visual and not moments.same_window(clip, segments):
                 log.info("skipping clip that crosses a transcript gap: %s", clip["title"])
@@ -642,6 +671,10 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                     continue
                 recent.append(clip["title"])
             clip = snap_to_words(clip, words)
+            if not moments.is_distinct((clip["start"], clip["end"]), taken):
+                log.info("skipping clip that repeats footage of one already made: %s", clip["title"])
+                continue
+            taken.append((clip["start"], clip["end"]))
             description = fixed
             if not fixed and campaign and campaign.disclosure_line:
                 # The campaign wants "caption text / #Ad on its own line / up to 3 hashtags" and nothing else.

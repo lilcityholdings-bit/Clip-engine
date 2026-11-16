@@ -932,3 +932,100 @@ def test_an_upload_makes_distinct_clips_that_post_three_hours_apart(tmp_path, mo
     times = [datetime.fromisoformat(r["scheduled_at"]) for r in rows]
     gaps = [(b - a).total_seconds() / 3600 for a, b in zip(times, times[1:])]
     assert len(times) == 3 and all(2.9 <= g <= 24 for g in gaps) and times == sorted(times)
+
+
+# --- every clip different; YouTube posting time chosen by the owner -------------------------------------------
+
+def test_overlap_helpers():
+    from clip_engine import moments
+    assert moments.overlap((0, 30), (20, 50)) == 10 and moments.overlap((0, 30), (30, 60)) == 0
+    assert moments.overlap({"start": 5, "end": 10}, (0, 100)) == 5
+    assert moments.is_distinct((30, 60), [(0, 30.4)]) and not moments.is_distinct((25, 60), [(0, 30)])
+
+
+def test_pick_clips_never_returns_two_clips_sharing_footage():
+    from clip_engine import ai
+    from tests.test_core import _claude_returning
+    mk = lambda a, b, sc, t: {"start": a, "end": b, "title": t, "description": "d", "tags": [], "hook_text": "h",
+                              "hashtags": [], "score": sc, "why": ""}
+    clips = [mk(0, 30, 9, "best"), mk(10, 40, 8, "overlaps the best"), mk(60, 90, 7, "separate"), mk(80, 110, 5, "spare overlap")]
+    seg = [{"start": 0, "end": 5, "text": "hi"}]
+    got = ai.pick_clips(_claude_returning({"clips": clips}), seg, source_title="T", fmt="short", min_sec=20, max_sec=58,
+                        title_style="question", count=4, want=3)
+    assert [c["title"] for c in got] == ["best", "separate"]  # the overlapping ones are left out, even when more are wanted
+
+
+def test_produce_skips_a_clip_that_repeats_footage_already_made(tmp_path, monkeypatch):
+    from clip_engine import ai
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["unused"])
+    monkeypatch.setattr(ai, "pick_clips", lambda *a, **k: [  # a model that ignores the instruction
+        {"start": 1, "end": 37, "title": "First look at the city", "description": "d", "tags": [], "hook_text": "",
+         "hashtags": [], "score": 8}, {"start": 20, "end": 56, "title": "A quieter moment later", "description": "d",
+                                       "tags": [], "hook_text": "", "hashtags": [], "score": 8},
+        {"start": 60, "end": 96, "title": "The party gathers", "description": "d", "tags": [], "hook_text": "",
+         "hashtags": [], "score": 8}])
+    rendered = []
+    monkeypatch.setattr(media, "render", lambda video_path, out, start, end, fmt, captions, **k: (
+        rendered.append((start, end)), out.parent.mkdir(parents=True, exist_ok=True), out.write_bytes(b"c"), out)[3])
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube")}, 3) == 2
+    assert len(rendered) == 2 and rendered[1][0] >= rendered[0][1] - 0.5  # the overlapping middle clip was dropped
+
+
+def test_parse_local_time_and_reschedule(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    now = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)  # 7am Eastern
+    assert pipeline.parse_local_time("2026-11-17T15:30", now) == "2026-11-17 20:30:00"  # 3:30pm ET is 20:30 UTC in November
+    assert pipeline.parse_local_time("2026-11-17T05:00", now) == "2026-11-17 12:00:00"  # in the past means now
+    for bad in ("", "tomorrow", "2026-13-40T99:00", "2027-02-01T10:00"):
+        with pytest.raises(ValueError):
+            pipeline.parse_local_time(bad, now)
+    conn = db.connect(tmp_path / "s.db")
+    cid, _ = _posted_clip(conn, tmp_path, platforms=("youtube",))
+    conn.execute("UPDATE posts SET status = 'queued'")
+    conn.commit()
+    pid = conn.execute("SELECT id FROM posts").fetchone()[0]
+    pipeline.reschedule(conn, pid, "2026-11-20 20:30:00")
+    assert conn.execute("SELECT scheduled_at FROM posts").fetchone()[0] == "2026-11-20 20:30:00"
+    conn.execute("UPDATE posts SET status = 'posted'")
+    pipeline.reschedule(conn, pid, "2026-11-25 10:00:00")  # a post that already went out is left alone
+    assert conn.execute("SELECT scheduled_at FROM posts").fetchone()[0] == "2026-11-20 20:30:00"
+
+
+def test_dashboard_lets_you_pick_the_youtube_time_when_approving_and_afterwards(server, tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    base, conn = server
+    _campaign(tmp_path)
+    db.put(conn, "auto_platforms", "youtube")
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"v")
+    cid = conn.execute(
+        "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms, file_path,"
+        " media_token) VALUES ('s', 'pod', 0, 30, 'Heismay clip', 'd', '[]', '{}', ?, ?)", (str(f), "m" * 32)).lastrowid
+    for p in ("youtube", "tiktok"):
+        conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, ?, 'review', datetime('now'))",
+                     (cid, p))
+    conn.commit()
+    page = _get(base + "/", "s3cret").read().decode()
+    assert page.count('type="datetime-local"') == 1 and "YouTube posts at" in page  # only the automatic account asks for a time
+    target = (datetime.now(ZoneInfo("America/New_York")) + timedelta(days=3)).replace(hour=15, minute=30, second=0, microsecond=0)
+    want = target.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    _get(base + "/review/approve", "s3cret", data=(
+        f"id={cid}&choose=1&platforms=youtube&platforms=tiktok&at={target.strftime('%Y-%m-%dT%H:%M')}").encode())
+    rows = {r["platform"]: (r["status"], r["scheduled_at"]) for r in conn.execute("SELECT * FROM posts")}
+    assert rows["youtube"] == ("queued", want) and rows["tiktok"][0] == "ready"
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Set time" in page and "Posting automatically" in page
+    later = (target + timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M")
+    pid = conn.execute("SELECT id FROM posts WHERE platform = 'youtube'").fetchone()[0]
+    page = _get(base + "/post/schedule", "s3cret", data=f"id={pid}&at={later}".encode()).read().decode()
+    assert "It will post at" in page
+    assert conn.execute("SELECT scheduled_at FROM posts WHERE platform = 'youtube'").fetchone()[0] == \
+        (target + timedelta(hours=4)).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    bad = _get(base + "/post/schedule", "s3cret", data=f"id={pid}&at=nonsense".encode()).read().decode()
+    assert "Pick a date and a time" in bad
