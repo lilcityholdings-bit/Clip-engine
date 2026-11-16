@@ -393,6 +393,10 @@ def _campaign_form(values: dict | None, editing: bool, open_form: bool) -> str:
 <label>Platforms it pays for</label><div class="checks">{checks}</div>
 <label>Options</label><div class="checks">
 <label><input type="checkbox" name="allow_music"{music_checked}> Background music allowed</label>
+<label>Skip at the start <small>seconds cut from the start of every video: rating cards, studio intros. 0 for none</small></label>
+<input type="text" name="trim_start" inputmode="decimal" placeholder="0" value="{val("trim_start") if v.get("trim_start") else ""}">
+<label>Skip at the end <small>seconds cut from the end of every video: logos, end cards. 0 for none</small></label>
+<input type="text" name="trim_end" inputmode="decimal" placeholder="0" value="{val("trim_end") if v.get("trim_end") else ""}">
 <label><input type="checkbox" name="paid_label"{paid_checked}> Use the apps' own paid-promotion switch <small>(untick if the campaign bans "paid promotion or ads of any kind"; the caption's #Ad is then the disclosure)</small></label>
 <label><input type="checkbox" name="active"{active_checked}> Live</label></div>
 <label>End date <small>optional</small></label><input type="date" name="ends_on" value="{val("ends_on")}">

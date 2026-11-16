@@ -472,6 +472,7 @@ def snap_to_words(clip: dict, words: list[dict]) -> dict:
 
 
 MAX_UPLOAD_ATTEMPTS = 3
+MIN_TRIMMED_CLIP_SEC = 5.0  # a clip left shorter than this once a campaign's skipped start and end are cut is dropped
 MAX_CLIPS_PER_UPLOAD = 5  # campaigns count the same footage posted more than 5 times as spam
 STALE_STATUS_MINUTES = 45
 
@@ -620,6 +621,13 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             if not visual and not moments.same_window(clip, segments):
                 log.info("skipping clip that crosses a transcript gap: %s", clip["title"])
                 continue
+            if campaign and (campaign.trim_start or campaign.trim_end) and not job.whole:
+                # The campaign's footage opens and closes with cards nobody should open a clip on: keep clear of them.
+                clip = {**clip, "start": max(clip["start"], campaign.trim_start),
+                        "end": min(clip["end"], src.duration - campaign.trim_end)}
+                if clip["end"] - clip["start"] < MIN_TRIMMED_CLIP_SEC:
+                    log.info("skipping clip that falls inside the skipped start or end: %s", clip["title"])
+                    continue
             fixed = approved_caption(conn, campaign) if campaign and campaign.approved_captions else ""
             if fixed:
                 # The campaign dictates the caption: use it exactly, with no hashtags, tags, links, credit lines

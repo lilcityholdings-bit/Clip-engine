@@ -59,6 +59,8 @@ class Campaign:
     allow_music: bool = True  # False if the program forbids adding background music
     approved_captions: list[str] = field(default_factory=list)  # if set, a clip's caption is one of these, word for word, and nothing else
     paid_label: bool = True  # False if the program forbids the platforms' own paid-promotion / paid-partnership switches
+    trim_start: float = 0.0  # seconds cut from the start of every source video (rating cards, intros)
+    trim_end: float = 0.0    # seconds cut from the end of every source video (logos, end cards)
     disclosure_line: str = ""  # e.g. "#Ad": the caption is the text, then this alone on the next line, then at most 3 hashtags
     active: bool = True
     ends_on: str | None = None
@@ -130,6 +132,19 @@ def approved_captions(text: str) -> list[str]:
     return list(dict.fromkeys(line for line in lines if line))
 
 
+def _seconds(value: str, label: str) -> float:
+    value = (value or "").strip()
+    if not value:
+        return 0.0
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise CampaignError(f"{label} must be a number of seconds, like 5.")
+    if not 0 <= seconds <= 60:
+        raise CampaignError(f"{label} must be between 0 and 60 seconds.")
+    return seconds
+
+
 def _disclosure(value: str) -> str:
     value = value.strip()
     if value and not re.fullmatch(r"#\w+", value):
@@ -192,6 +207,8 @@ def from_form(form: dict[str, str], platforms: list[str]) -> Campaign:
         allow_music=form.get("allow_music") == "on",
         approved_captions=approved_captions(form.get("approved_captions", "")),
         disclosure_line=_disclosure(form.get("disclosure_line", "")),
+        trim_start=_seconds(form.get("trim_start", ""), "Skip at the start"),
+        trim_end=_seconds(form.get("trim_end", ""), "Skip at the end"),
         paid_label=form.get("paid_label") == "on",
         active=form.get("active", "on") == "on",
         ends_on=ends_on,

@@ -838,3 +838,49 @@ def test_an_old_database_is_migrated_to_allow_reposting_without_losing_posts(tmp
         conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (1, 'tiktok', 'queued', 'now')")
     conn.rollback()
     assert db.connect(path).execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 2  # reconnecting changes nothing
+
+
+# --- skipping a campaign's intro and outro cards -------------------------------------------------------------
+
+def test_trim_fields_in_the_campaign_form():
+    form = {"name": "Sega", "program_url": "https://w", "rate": "1", "trim_start": " 5 ", "trim_end": "3.5"}
+    camp = campaigns.from_form(form, ["tiktok"])
+    assert camp.trim_start == 5.0 and camp.trim_end == 3.5
+    assert campaigns.from_form({k: v for k, v in form.items() if not k.startswith("trim")}, ["tiktok"]).trim_start == 0.0
+    for bad in ("x", "-1", "61"):
+        with pytest.raises(campaigns.CampaignError, match="Skip at the start"):
+            campaigns.from_form({**form, "trim_start": bad}, ["tiktok"])
+
+
+def _trim_run(tmp_path, monkeypatch, campaign_kwargs, picks):
+    import json
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, campaign_kwargs, ["unused"])
+    from clip_engine import strategy
+    monkeypatch.setattr(strategy, "length_range", lambda arms: (20, 58))  # the engine picks 20-35s or 35-58s at random
+    monkeypatch.setattr(media, "duration", lambda p: 100.0)
+    rendered = []
+    monkeypatch.setattr(media, "render", lambda video_path, out, start, end, fmt, captions, **k: (
+        rendered.append((start, end)), out.parent.mkdir(parents=True, exist_ok=True), out.write_bytes(b"c"), out)[3])
+    claude.beta.messages.create.return_value.content[0].text = json.dumps({"clips": [
+        {"start": a, "end": b, "title": t, "description": "d", "tags": [], "hook_text": "", "hashtags": [],
+         "score": 8, "why": ""} for a, b, t in picks]})
+    monkeypatch.setattr(media, "transcribe", lambda v, m, windows=None: (  # speech covers the whole video
+        [{"start": 0, "end": 100, "text": "hi", "window": 0, "energy": 2.0}],
+        [{"start": 0.5 + i * 0.8, "end": 1.0 + i * 0.8, "word": f" w{i}"} for i in range(120)]))
+    pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube")}, 4)
+    return rendered
+
+
+def test_clips_keep_clear_of_the_skipped_start_and_end(tmp_path, monkeypatch):
+    rendered = _trim_run(tmp_path, monkeypatch, {"trim_start": 5.0, "trim_end": 4.0},
+                         [(0, 40, "Opens on a rating card"), (55, 99, "Ends near a studio logo")])
+    assert len(rendered) == 2 and all(a >= 4.7 and b <= 96.5 for a, b in rendered)
+    assert rendered[0][0] > 4.7 and rendered[1][1] < 96.5  # the first clip lost its start, the second its end
+
+
+def test_a_clip_left_too_short_by_the_skip_is_dropped(tmp_path, monkeypatch):
+    rendered = _trim_run(tmp_path, monkeypatch, {"trim_start": 38.0}, [(0, 40, "Almost all of it is skipped")])
+    assert rendered == []  # only 2 seconds would be left
