@@ -734,3 +734,11 @@ def test_produce_makes_each_built_video_its_own_clip_and_keeps_to_the_daily_limi
     assert titles == [f"Look number {i} at the drone" for i in range(4)]  # different captions, none dropped as repeats
     descriptions = [r["description"] for r in conn.execute("SELECT description FROM clips ORDER BY id")]
     assert all(d.startswith(t + "\n#Ad") for d, t in zip(descriptions, titles))
+
+
+def test_strict_caption_campaigns_tell_claude_to_stay_plain_and_true():
+    plain = campaigns.Campaign(id="a", name="a", program_url="u", rate_per_1k_views=1, sources=[], rules="No gore.")
+    strict = campaigns.Campaign(id="b", name="b", program_url="u", rate_per_1k_views=1, sources=[], rules="No gore.",
+                                disclosure_line="#Ad")
+    assert pipeline.caption_rules(plain) == "No gore." and pipeline.caption_rules(None) == ""
+    assert pipeline.caption_rules(strict).startswith("No gore.") and "Quote only words" in pipeline.caption_rules(strict)

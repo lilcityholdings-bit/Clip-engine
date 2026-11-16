@@ -316,6 +316,18 @@ def niche_of(campaign: campaigns.Campaign | None, arms: dict) -> str:
     return arms.get("topic", "education")
 
 
+PLAIN_CAPTIONS = (" Titles and captions must be plain and descriptive: say what the clip shows. Quote only words "
+                  "that are actually spoken in the clip. No claims, superlatives, predictions or invented lines, "
+                  "and no hype hooks.")
+
+
+def caption_rules(campaign: campaigns.Campaign | None) -> str:
+    """The campaign's rules for Claude. A campaign with a strict disclosure layout also gets the plain-caption rule."""
+    if campaign is None:
+        return ""
+    return campaign.rules + (PLAIN_CAPTIONS if campaign.disclosure_line else "")
+
+
 def approved_caption(conn: sqlite3.Connection, campaign: campaigns.Campaign) -> str:
     """The next of the campaign's approved captions, in turn, so consecutive clips don't repeat one."""
     made = conn.execute("SELECT COUNT(*) FROM clips WHERE campaign_id = ?", (campaign.id,)).fetchone()[0]
@@ -587,7 +599,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             clips = ai.pick_clips(
                 claude, segments, source_title=src.title, fmt=arms["format"],
                 min_sec=lo, max_sec=hi, title_style=arms["title_style"], count=remaining,
-                rules=campaign.rules if campaign else "",
+                rules=caption_rules(campaign),
                 track_record=track_record(conn),
                 recent_titles=recent,
                 trends=trends.as_prompt(trends.brief(conn, claude, niche_of(campaign, arms), settings.trend_region)),
