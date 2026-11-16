@@ -541,3 +541,33 @@ def test_thumbnail_of_a_real_photo_and_video(tmp_path):
     for src, photo in ((tmp_path / "a.jpg", True), (tmp_path / "v.mp4", False)):
         data = media.thumbnail(src, tmp_path / f"t-{src.stem}.jpg", photo)
         assert data[:2] == b"\xff\xd8" and media._dimensions(tmp_path / f"t-{src.stem}.jpg")[0] <= 512
+
+
+# --- a campaign that wants the disclosure alone on the line after the caption ---------------------
+
+def test_disclosed_caption_layout_and_form_field():
+    cap = campaigns.disclosed_caption("Heismay in action #Fun @sega  now", ["#Ad", "#gaming", "#jrpg", "#sega", "#extra"], "#Ad")
+    assert cap == "Heismay in action now\n#Ad\n#gaming #jrpg #sega"  # #Ad alone and first; at most 3 more; text has no tags
+    assert campaigns.disclosed_caption("Just text", [], "#Ad") == "Just text\n#Ad"
+    form = {"name": "Sega", "program_url": "https://w", "rate": "1", "disclosure_line": " #Ad "}
+    assert campaigns.from_form(form, ["tiktok"]).disclosure_line == "#Ad"
+    with pytest.raises(campaigns.CampaignError, match="single hashtag"):
+        campaigns.from_form({**form, "disclosure_line": "#Ad #more"}, ["tiktok"])
+    assert campaigns.from_form({k: v for k, v in form.items() if k != "disclosure_line"}, ["tiktok"]).disclosure_line == ""
+    from clip_engine import platforms
+    clip = {"title": "Heismay in action", "description": cap}
+    assert platforms.caption_for({"title": "Heismay in action", "description": "Heismay in action\n#Ad\n#gaming"}) == \
+        "Heismay in action\n#Ad\n#gaming"  # not doubled
+    assert platforms.caption_for({"title": "A", "description": "B"}) == "A\n\nB"  # other campaigns unchanged
+
+
+def test_clips_under_a_disclosure_line_campaign_have_nothing_else_in_the_caption(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {"disclosure_line": "#Ad"}, ["Heismay in action #Fun"])
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 1) >= 1
+    row = conn.execute("SELECT title, description FROM clips ORDER BY id LIMIT 1").fetchone()
+    assert row["title"] == "Heismay in action"
+    assert row["description"] == "Heismay in action\n#Ad\n#podcast"  # no credit line, no #Shorts, no link

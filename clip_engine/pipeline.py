@@ -552,6 +552,14 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                     continue
                 recent.append(clip["title"])
             clip = snap_to_words(clip, words)
+            description = fixed
+            if not fixed and campaign and campaign.disclosure_line:
+                # The campaign wants "caption text / #Ad on its own line / up to 3 hashtags" and nothing else.
+                text = campaigns.disclosed_caption(clip["title"], [], campaign.disclosure_line)
+                plain = text.split("\n")[0]
+                tags = policy.clean_hashtags(clip.get("hashtags", []))
+                clip = {**clip, "title": plain}
+                description = campaigns.disclosed_caption(plain, tags, campaign.disclosure_line)
             if arms["format"] == "short":
                 clip["end"] = min(clip["end"], clip["start"] + 59)
             token = secrets.token_hex(16)
@@ -570,7 +578,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                 "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags,"
                 " arms, file_path, media_token, ai_score, hook_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (src.identifier, campaign.id if campaign else None, clip["start"], clip["end"], clip["title"],
-                 fixed or compose_description(clip, job.footer), json.dumps(clip["tags"]), json.dumps(arms),
+                 description or compose_description(clip, job.footer), json.dumps(clip["tags"]), json.dumps(arms),
                  str(out), token, clip.get("score"), clip.get("hook_text", "")),
             )
             reviewing = review_mode(conn)

@@ -58,6 +58,7 @@ class Campaign:
     niche: str = ""           # what the creator's content is about, for trend research
     allow_music: bool = True  # False if the program forbids adding background music
     approved_captions: list[str] = field(default_factory=list)  # if set, a clip's caption is one of these, word for word, and nothing else
+    disclosure_line: str = ""  # e.g. "#Ad": the caption is the text, then this alone on the next line, then at most 3 hashtags
     active: bool = True
     ends_on: str | None = None
 
@@ -128,6 +129,22 @@ def approved_captions(text: str) -> list[str]:
     return list(dict.fromkeys(line for line in lines if line))
 
 
+def _disclosure(value: str) -> str:
+    value = value.strip()
+    if value and not re.fullmatch(r"#\w+", value):
+        raise CampaignError("The disclosure must be a single hashtag, like #Ad.")
+    return value
+
+
+def disclosed_caption(text: str, hashtags: list[str], disclosure: str, limit: int = 3) -> str:
+    """The campaign's layout: the caption text, then the disclosure hashtag on its own line right after it,
+    then (on the next line) up to `limit` more hashtags. The text carries no hashtags of its own, so the
+    disclosure is the first hashtag."""
+    plain = re.sub(r"\s+", " ", re.sub(r"[#@]\w+", "", text)).strip()
+    more = [h for h in hashtags if h.lower() != disclosure.lower()][:limit]
+    return "\n".join(part for part in (plain, disclosure, " ".join(more)) if part)
+
+
 def from_form(form: dict[str, str], platforms: list[str]) -> Campaign:
     """Build a campaign from the dashboard form, or raise CampaignError explaining what to fix."""
     name = form.get("name", "").strip()
@@ -173,6 +190,7 @@ def from_form(form: dict[str, str], platforms: list[str]) -> Campaign:
         niche=form.get("niche", "").strip(),
         allow_music=form.get("allow_music") == "on",
         approved_captions=approved_captions(form.get("approved_captions", "")),
+        disclosure_line=_disclosure(form.get("disclosure_line", "")),
         active=form.get("active", "on") == "on",
         ends_on=ends_on,
     )

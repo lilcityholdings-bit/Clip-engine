@@ -86,6 +86,8 @@ Some campaigns hand clippers a source video to download (a Drive or Dropbox file
 
 Some campaigns require one of their own captions, word for word, and forbid other hashtags, tags or links. Paste those into **Approved captions** (one per line) when adding the campaign. The engine then uses one of them, in turn, as every clip's title and caption, and adds nothing else: no hashtags, tags, credit line, links or on-screen hook text. The campaign's required `#ad` must already be inside the approved captions. Leave the box empty for the normal, engine-written captions.
 
+**Campaigns that want the disclosure on its own line** (for example "the first hashtag, alone on the line right after the caption, then up to 3 more"): type that hashtag (`#Ad`) in **Disclosure on its own line** when adding the campaign. Each post's caption is then exactly: the clip's caption text (no tags or mentions of its own), a line with only `#Ad`, and a line with at most 3 related hashtags. No credit line, link or `#Shorts` is added. Put the campaign's wording rules (for example "no made-up facts, stats or dates; don't copy other clippers' captions") in **Creator's rules** so Claude follows them when writing the caption.
+
 **Silent or speechless footage:** when a video has no speech to read (a product reel, b-roll) and the campaign has approved captions, the engine cuts it along the shot changes instead: back-to-back clips of 10-58 seconds that end on a cut, taken evenly across the video, framed vertically, with no burned-in words or hook text, and no Claude call. Without approved captions, a speechless video is skipped because there is no caption to write.
 
 ## Phone alerts

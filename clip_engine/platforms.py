@@ -30,9 +30,10 @@ class PublishError(RuntimeError):
 
 
 def caption_for(clip: dict) -> str:
-    """Title then description, or just one of them when a campaign's approved caption is both."""
-    if clip["title"].strip() == clip["description"].strip():
-        return clip["title"][:2200]
+    """Title then description, or just the description when it already begins with the title
+    (a campaign's approved caption, or a caption laid out with its disclosure line)."""
+    if clip["description"].strip().startswith(clip["title"].strip()):
+        return clip["description"][:2200]
     return f"{clip['title']}\n\n{clip['description']}"[:2200]
 
 
