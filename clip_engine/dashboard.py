@@ -203,7 +203,7 @@ function sendVideo(form, btn) {
   const next = () => {
     const file = files[i];
     const q = new URLSearchParams({campaign: form.campaign.value, creator: form.creator.value,
-                                   title: form.title.value, length: form.length.value, name: file.name,
+                                   title: form.title.value, length: form.length.value, count: form.count.value, name: file.name,
                                    batch: combine ? batch : '', last: i === files.length - 1 ? '1' : ''});
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/manual-video/upload?' + q.toString());
@@ -329,10 +329,15 @@ def _own_video(conn, settings: Settings) -> str:
         f'<label>Files <small>(videos and photos, up to {manual.MAX_UPLOAD_MB} MB each; pick several at once)</small></label>'
         f'<input type="file" name="file" accept="video/*,image/*" multiple>'
         f'<div class="checks" style="flex-direction:column;align-items:flex-start;margin-top:8px">'
-        f'<label><input type="radio" name="mode" value="combine" checked> Make <b>one video</b> from all of them, '
-        f'in the order picked (photos zoom slowly)</label>'
+        f'<label><input type="radio" name="mode" value="combine" checked> <b>Combine</b> them into new videos, '
+        f'in a smart order (photos zoom slowly)</label>'
         f'<label><input type="radio" name="mode" value="each"> Clip <b>each video</b> separately (videos only)</label></div>'
-        f'<label style="margin-top:8px">Length of the one video</label>'
+        f'<label style="margin-top:8px">How many different videos? <small>(when combining; the engine splits your files '
+        f'between them, so give it enough files for each, about 6 to 10 photos or clips per video)</small></label>'
+        f'<select name="count" style="width:100%;font:inherit;padding:9px">'
+        + "".join(f'<option value="{n}">{n}</option>' for n in range(1, manual.MAX_VIDEOS + 1)) +
+        f'</select>'
+        f'<label style="margin-top:8px">How long should each one be?</label>'
         f'<select name="length" style="width:100%;font:inherit;padding:9px"><option value="30">15 to 30 seconds (best)</option>'
         f'<option value="60">Up to 60 seconds</option></select>'
         f'<div class="muted status" style="margin:6px 0"></div>'
@@ -1081,9 +1086,12 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                             count = manual.finish_batch(conn, batch, {
                                 "campaign_id": query["campaign"], "creator": manual.clean_text(query.get("creator", "")),
                                 "title": manual.clean_text(query.get("title", "")),
-                                "length": manual.clean_length(query.get("length", ""))})
-                            return reply(200, start_now(conn, settings, f"{count} file{'s' if count > 1 else ''} uploaded "
-                                                                        "and will be made into one video."))
+                                "length": manual.clean_length(query.get("length", "")),
+                                "count": manual.clean_count(query.get("count", ""))})
+                            videos = manual.queue(conn)[-1]["count"]
+                            made = "one video" if videos == 1 else f"{videos} different videos"
+                            return reply(200, start_now(conn, settings, f"{count} file{'s' if count > 1 else ''} "
+                                                                        f"uploaded and will be made into {made}."))
                     except manual.UploadError as exc:
                         return reply(400, str(exc))
                     return reply(200, "File added.")

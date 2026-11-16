@@ -19,6 +19,7 @@ VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".webm", ".m4v")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
 ALLOWED_EXTENSIONS = VIDEO_EXTENSIONS + IMAGE_EXTENSIONS
 MAX_PIECES = 30  # most files that can be combined into one video
+MAX_VIDEOS = 5   # most different videos made from one set of files
 BATCH_KEY = "manual_batches"
 BATCH_MAX_AGE_HOURS = 24
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "2000"))
@@ -153,6 +154,14 @@ def add_to_batch(conn: sqlite3.Connection, batch_id: str, path: Path) -> int:
 def clean_length(value: str) -> str:
     """The length chosen for a combined video: "60" (up to a minute) or the default "30" (15 to 30 seconds)."""
     return "60" if (value or "").strip() == "60" else "30"
+
+
+def clean_count(value: str) -> int:
+    """How many different videos to make from a set of files: 1 to 5 (the most one upload may produce)."""
+    try:
+        return max(1, min(MAX_VIDEOS, int(value)))
+    except (TypeError, ValueError):
+        return 1
 
 
 def finish_batch(conn: sqlite3.Connection, batch_id: str, item: dict) -> int:

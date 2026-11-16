@@ -36,7 +36,9 @@ class Job:
     footer: str                 # appended to every clip's description
     campaign: campaigns.Campaign | None = None
     item: dict | None = None    # the queued video you handed over, if this job came from one
-    whole: bool = False         # a video built from several of your files: it is posted as one clip, uncut
+    whole: bool = False         # videos built from several of your files: each is posted as one clip, uncut
+    windows: list | None = None  # whole jobs: where each built video starts and ends in the working file
+    titles: list | None = None   # whole jobs: the caption of each built video
 
 
 def attribution(src: sources.Source, fmt: str) -> str:
@@ -152,10 +154,10 @@ def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
             log.info("dropping %s: its campaign isn't live", item)
             manual.discard(item)
             continue
-        whole = False
+        whole, windows, titles = False, None, None
         try:
             if item["kind"] == "project":
-                src = _build_project(item, campaign, claude)
+                src, windows, titles = _build_project(item, campaign, claude)
                 whole = True
             elif item["kind"] == "file":
                 path = Path(item["ref"])
@@ -179,30 +181,91 @@ def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
                              music=music if campaign.allow_music else None)
         if whole:
             arms["format"] = "short"  # the video is built vertical
-        return Job(arms, src, campaigns.caption_lines(campaign, src, arms["format"]), campaign, item, whole)
+        return Job(arms, src, campaigns.caption_lines(campaign, src, arms["format"]), campaign, item, whole, windows, titles)
     return None
 
 
-def _build_project(item: dict, campaign: campaigns.Campaign,
-                   claude: anthropic.Anthropic | None = None) -> sources.Source:
-    """Join the files you uploaded together (videos and photos) into one vertical video,
-    in the order Claude thinks works best (or the upload order if Claude isn't available)."""
+def _build_project(item: dict, campaign: campaigns.Campaign, claude: anthropic.Anthropic | None = None):
+    """Join the files you uploaded (videos and photos) into one vertical video, or into several different ones
+    when you asked for more than one. Claude chooses the order and the split (the upload order if it isn't
+    available). Returns (source, windows, titles): the working file and, per finished video, where it sits in
+    the file and its caption."""
     files = [Path(f) for f in item["files"] if Path(f).exists()]
     if not files:
         raise FileNotFoundError("none of the uploaded files are left")
     stem = Path(files[0]).stem
     work = files[0].parent / f"build-{stem}"
     budget = media.COMPILATION_MAX_SEC if item.get("length") == "60" else media.COMPILATION_DEFAULT_SEC
+    base = item.get("title") or campaign.name
+    count = max(1, min(item.get("count", 1), len(files), manual.MAX_VIDEOS))
+    out = files[0].parent / f"{stem}-combined.mp4"
     try:
-        if claude is not None and len(files) > 1:
-            files = arrange(claude, files, campaign, work)
-        built = media.assemble(files, files[0].parent / f"{stem}-combined.mp4", work, budget)
+        if count > 1:
+            groups = arrange_groups(claude, files, campaign, work, count, base)
+            built, windows = media.assemble_many([g for g, _ in groups], out, work, budget)
+            titles = [t for _, t in groups]
+        else:
+            if claude is not None and len(files) > 1:
+                files = arrange(claude, files, campaign, work)
+            built = media.assemble(files, out, work, budget)
+            windows, titles = [(0.0, media.duration(built))], [base]
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return sources.Source(
-        identifier=f"upload:{stem}", title=item.get("title") or campaign.name,
-        creator=item.get("creator") or campaign.name, license_url=campaign.program_url,
-        video_url=str(built), duration=media.duration(built), page=campaign.program_url)
+    src = sources.Source(
+        identifier=f"upload:{stem}", title=base, creator=item.get("creator") or campaign.name,
+        license_url=campaign.program_url, video_url=str(built), duration=media.duration(built),
+        page=campaign.program_url)
+    return src, windows, titles
+
+
+def split_evenly(weights: list[float], count: int) -> list[list[int]]:
+    """Cut a list of pieces (with their on-screen seconds) into `count` runs of about equal length, keeping order."""
+    count = max(1, min(count, len(weights)))
+    target = sum(weights) / count
+    groups: list[list[int]] = [[] for _ in range(count)]
+    before = 0.0
+    for i, w in enumerate(weights):
+        groups[min(count - 1, int((before + w / 2) / target))].append(i)
+        before += w
+    return [g for g in groups if g]
+
+
+def arrange_groups(claude: anthropic.Anthropic | None, files: list[Path], campaign: campaigns.Campaign, work: Path,
+                   count: int, base: str) -> list[tuple[list[Path], str]]:
+    """Split the files into `count` different videos, each with a caption: Claude looks at a frame of each file
+    and decides the split, the order and the captions. Any problem: an even split in upload order, captioned
+    "<title> 1", "<title> 2" ..."""
+    weights = [media.IMAGE_SEC if manual.is_image(f) else min(media.duration(f), media.COMPILATION_MAX_SEC) for f in files]
+    even = [([files[i] for i in run], f"{base} {n}") for n, run in enumerate(split_evenly(weights, count), 1)]
+    if claude is None:
+        return even
+    try:
+        work.mkdir(parents=True, exist_ok=True)
+        pieces = []
+        for i, f in enumerate(files):
+            photo = manual.is_image(f)
+            label = "photo" if photo else f"video, {media.duration(f):.0f} seconds"
+            pieces.append((label, media.thumbnail(f, work / f"thumb{i}.jpg", photo)))
+        brief = "; ".join(x for x in (campaign.name, campaign.niche, campaign.rules) if x)
+        result = ai.plan_videos(claude, pieces, brief, count)
+        used: set[int] = set()
+        groups: list[tuple[list[Path], str]] = []
+        for v in result.get("videos", []):
+            picked = [i for i in dict.fromkeys(v.get("pieces", []))
+                      if isinstance(i, int) and 0 <= i < len(files) and i not in used]
+            if not picked:
+                continue
+            used.update(picked)
+            title = manual.clean_text(v.get("title", ""), 100) or f"{base} {len(groups) + 1}"
+            groups.append(([files[i] for i in picked], title))
+        for d in result.get("dropped", []):
+            log.info("left out piece %s: %s", d.get("piece"), d.get("why"))
+        if not groups:
+            raise ValueError(f"no usable videos in {result!r}")
+        return groups[:count]
+    except Exception:
+        log.exception("could not plan the videos; splitting evenly in upload order")
+        return even
 
 
 def arrange(claude: anthropic.Anthropic, files: list[Path], campaign: campaigns.Campaign, work: Path) -> list[Path]:
@@ -513,8 +576,11 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
         if job.whole:
             # Built from your own files: the whole video is the clip, never cut up or re-framed.
             visual, recent = True, []
-            clips = [{"start": 0.0, "end": min(src.duration, media.COMPILATION_MAX_SEC), "title": src.title,
-                      "description": "", "tags": [], "hook_text": "", "hashtags": [], "score": None}]
+            spans = job.windows or [(0.0, src.duration)]
+            names = job.titles or [src.title] * len(spans)
+            clips = [{"start": a, "end": min(b, a + media.COMPILATION_MAX_SEC), "title": t, "description": "",
+                      "tags": [], "hook_text": "", "hashtags": [], "score": None}
+                     for (a, b), t in zip(spans, names)][:remaining]
         elif moments.has_speech(words):
             moments.mark_replayed(segments, src.heatmap)
             recent = policy.recent_titles(conn)
@@ -547,7 +613,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                 # The campaign dictates the caption: use it exactly, with no hashtags, tags, links, credit lines
                 # or on-screen hook text of our own, and don't treat its repeats as spam.
                 clip = {**clip, "title": fixed, "description": fixed, "tags": [], "hashtags": [], "hook_text": ""}
-            else:
+            elif not job.whole:  # videos made together are different on purpose
                 twin = policy.near_duplicate(clip["title"], recent)
                 if twin:
                     log.info("skipping clip that looks like a repeat of %r: %s", twin, clip["title"])

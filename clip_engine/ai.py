@@ -227,3 +227,50 @@ def arrange_pieces(client: anthropic.Anthropic, pieces: list[tuple[str, bytes]],
         "Reply with `order`: the piece numbers to keep, in the order to show them, each at most once; and "
         "`dropped`: each piece left out with a short reason.")})
     return _json_call(client, content, ARRANGE_SCHEMA, effort="low")
+
+
+VIDEOS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "videos": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"pieces": {"type": "array", "items": {"type": "integer"}}, "title": {"type": "string"}},
+            "required": ["pieces", "title"], "additionalProperties": False}},
+        "dropped": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"piece": {"type": "integer"}, "why": {"type": "string"}},
+            "required": ["piece", "why"], "additionalProperties": False}},
+    },
+    "required": ["videos", "dropped"],
+    "additionalProperties": False,
+}
+
+
+def plan_videos(client: anthropic.Anthropic, pieces: list[tuple[str, bytes]], brief: str, count: int) -> dict:
+    """Look at one frame of each photo or video and split them into `count` DIFFERENT short vertical videos.
+
+    pieces: (label, JPEG bytes) in upload order; the label says how long a video piece is. Returns
+    {"videos": [{"pieces": [numbers in showing order], "title": caption}], "dropped": [{"piece", "why"}]}.
+    """
+    import base64
+    content: list[dict] = [{"type": "text", "text": (
+        f"You are editing {count} different short vertical social videos (YouTube Shorts / TikTok / Reels) from the "
+        f"pieces below, for this paid campaign: {brief}\n"
+        "Each piece is a photo or a video clip; you see one frame of each. A photo counts as about 3 seconds of "
+        "screen time, a video piece as its length. Make exactly "
+        f"{count} videos, each about 15 to 30 seconds of material, each telling its own clear story. Use each piece "
+        "in at most one video, so the videos look different from one another, and give each a similar amount of "
+        "material. Within a video put the strongest, most eye-catching shot first, group related shots, and end "
+        "on a clean shot. Drop a piece only if it is clearly unusable: blurry, nearly black, an accidental shot, a "
+        "near-duplicate of another piece (keep the better one), or showing another app's watermark. "
+        "Give each video a short caption of at most 80 characters that says plainly and truthfully what the "
+        "viewer sees. Describe only what is visible: no claims, facts, stats or dates, no hashtags, no mentions, no "
+        "emojis, and nothing exaggerated or clickbait. The captions must differ from each other.")}]
+    for i, (label, jpeg) in enumerate(pieces):
+        content.append({"type": "text", "text": f"Piece {i}: {label}"})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                     "data": base64.b64encode(jpeg).decode()}})
+    content.append({"type": "text", "text": (
+        f"Reply with `videos`: exactly {count} entries, each with `pieces` (the piece numbers in showing order) "
+        "and `title` (the caption); and `dropped`: each piece left out, with a short reason.")})
+    return _json_call(client, content, VIDEOS_SCHEMA, effort="low")

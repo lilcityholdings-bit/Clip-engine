@@ -448,10 +448,10 @@ def test_dashboard_upload_batch_route_queues_one_project(server, tmp_path, monke
     assert manual.clean_length("60") == "60" and manual.clean_length("") == "30" and manual.clean_length("999") == "30"
     conn = db.connect(tmp_path / "clip_engine.db")
     assert manual.queue(conn) == []
-    status, reply = upload("campaign=pod&name=b.mp4&batch=batch0001&last=1&title=Drone&length=60", b"video")
-    assert status == 200 and "2 files" in reply["message"] and "one video" in reply["message"]
+    status, reply = upload("campaign=pod&name=b.mp4&batch=batch0001&last=1&title=Drone&length=60&count=3", b"video")
+    assert status == 200 and "2 files" in reply["message"] and "3 different videos" in reply["message"]
     item = manual.queue(conn)[0]
-    assert item["kind"] == "project" and len(item["files"]) == 2 and item["title"] == "Drone" and item["length"] == "60"
+    assert item["kind"] == "project" and len(item["files"]) == 2 and item["title"] == "Drone" and item["length"] == "60" and item["count"] == 3
     assert db.get(conn, "run_now") == "1"
 
 
@@ -626,3 +626,111 @@ def test_hand_posting_tips_follow_the_campaign_rules():
 
 def test_one_upload_makes_at_most_five_clips(tmp_path, monkeypatch):
     assert pipeline.MAX_CLIPS_PER_UPLOAD == 5
+
+
+# --- several different videos from one set of files ---------------------------------------------------------
+
+def test_split_evenly_keeps_order_and_balances_length():
+    assert pipeline.split_evenly([3, 3, 3, 3, 3, 3], 2) == [[0, 1, 2], [3, 4, 5]]
+    assert pipeline.split_evenly([3, 3, 3, 3, 3, 3], 3) == [[0, 1], [2, 3], [4, 5]]
+    assert pipeline.split_evenly([20, 3, 3, 3, 3, 20], 2) == [[0, 1, 2], [3, 4, 5]]
+    assert pipeline.split_evenly([3, 3], 5) == [[0], [1]]  # never more videos than files
+    assert pipeline.split_evenly([5], 1) == [[0]]
+    assert manual.clean_count("3") == 3 and manual.clean_count("99") == manual.MAX_VIDEOS and manual.clean_count("x") == 1
+    assert manual.clean_count("0") == 1
+
+
+def _files(tmp_path, names):
+    out = []
+    for n in names:
+        f = tmp_path / n
+        f.write_bytes(b"x")
+        out.append(f)
+    return out
+
+
+def test_claude_splits_the_files_into_different_videos_with_their_own_captions(tmp_path, monkeypatch):
+    from tests.test_core import _claude_returning
+    camp = campaigns.Campaign(id="r", name="Ring", program_url="https://w", rate_per_1k_views=1, sources=[])
+    files = _files(tmp_path, ["a.jpg", "b.jpg", "c.jpg", "d.mp4", "e.jpg"])
+    monkeypatch.setattr(media, "thumbnail", lambda src, out, photo: b"jpeg")
+    monkeypatch.setattr(media, "duration", lambda p: 12.0)
+    claude = _claude_returning({"videos": [
+        {"pieces": [3, 0, 3, 99], "title": "The drone at night #wow"},   # repeats and unknown pieces are ignored
+        {"pieces": [4, 1, 0], "title": "  "},                           # 0 is already used; a blank caption gets a numbered one
+        {"pieces": [2], "title": "A third video"}], "dropped": []})
+    groups = pipeline.arrange_groups(claude, files, camp, tmp_path / "w", 3, "Drone")
+    assert [[f.name for f in g] for g, _ in groups] == [["d.mp4", "a.jpg"], ["e.jpg", "b.jpg"], ["c.jpg"]]
+    assert [t for _, t in groups] == ["The drone at night #wow", "Drone 2", "A third video"]
+    assert claude.beta.messages.create.call_count == 1
+    sent = claude.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert sum(b["type"] == "image" for b in sent) == 5 and "exactly 3" in sent[0]["text"]
+    # asking for fewer than Claude returns keeps only what was asked
+    claude2 = _claude_returning({"videos": [{"pieces": [0], "title": "x"}, {"pieces": [1], "title": "y"}], "dropped": []})
+    assert len(pipeline.arrange_groups(claude2, files, camp, tmp_path / "w", 1, "Drone")) == 1
+
+
+def test_splitting_falls_back_to_an_even_split_when_claude_cannot_help(tmp_path, monkeypatch):
+    from tests.test_core import _claude_returning
+    camp = campaigns.Campaign(id="r", name="Ring", program_url="https://w", rate_per_1k_views=1, sources=[])
+    files = _files(tmp_path, ["a.jpg", "b.jpg", "c.jpg", "d.jpg"])
+    monkeypatch.setattr(media, "thumbnail", lambda src, out, photo: b"jpeg")
+    broken = _claude_returning({})
+    broken.beta.messages.create.side_effect = RuntimeError("API down")
+    for claude in (broken, _claude_returning({"videos": [], "dropped": []}), None):
+        groups = pipeline.arrange_groups(claude, files, camp, tmp_path / "w", 2, "Drone")
+        assert [[f.name for f in g] for g, _ in groups] == [["a.jpg", "b.jpg"], ["c.jpg", "d.jpg"]]
+        assert [t for _, t in groups] == ["Drone 1", "Drone 2"]
+
+
+def test_assemble_many_makes_separate_videos_in_one_working_file(tmp_path):
+    import subprocess
+    def ff(*args):
+        subprocess.run(["ffmpeg", "-y", "-v", "error", *args], check=True)
+    for n in ("a", "b", "c", "d"):
+        ff("-f", "lavfi", "-i", f"testsrc2=s=1200x900:d=1", "-frames:v", "1", str(tmp_path / f"{n}.jpg"))
+    ff("-f", "lavfi", "-i", "testsrc=s=1280x720:d=4:r=24", "-f", "lavfi", "-i", "sine=f=440:d=4", "-shortest",
+       str(tmp_path / "v.mp4"))
+    groups = [[tmp_path / "a.jpg", tmp_path / "b.jpg"], [tmp_path / "v.mp4", tmp_path / "c.jpg", tmp_path / "d.jpg"]]
+    out, windows = media.assemble_many(groups, tmp_path / "all.mp4", tmp_path / "w")
+    assert media._dimensions(out) == (1080, 1920) and media.has_audio(out)  # one soundtrack setting for both videos
+    assert len(windows) == 2 and windows[0][0] == 0 and abs(windows[0][1] - windows[1][0]) < 0.01
+    assert windows[0][1] - windows[0][0] >= 9.5  # two photos held long to get near 15s
+    assert abs(windows[1][1] - media.duration(out)) < 0.3
+
+
+def test_produce_makes_each_built_video_its_own_clip_and_keeps_to_the_daily_limit(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub, _claude_returning
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {"disclosure_line": "#Ad"}, ["unused"])
+    db.put(conn, manual.QUEUE_KEY, "[]")
+    pieces = []
+    for name in ("a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg"):
+        f = tmp_path / "uploads" / name
+        f.write_bytes(b"x")
+        pieces.append(str(f))
+    manual.add(conn, {"kind": "project", "files": pieces, "campaign_id": "pod", "creator": "", "title": "Drone",
+                      "count": 5, "length": "30"})
+    seen = {}
+
+    def fake_many(groups, out, work, budget=30.0):
+        seen["groups"] = [[p.name for p in g] for g in groups]
+        out.write_bytes(b"combined")
+        return out, [(0.0, 20.0), (20.0, 42.0), (42.0, 61.0), (61.0, 80.0), (80.0, 99.0)]
+    monkeypatch.setattr(media, "assemble_many", fake_many)
+    monkeypatch.setattr(media, "thumbnail", lambda src, out, photo: b"jpeg")
+    monkeypatch.setattr(media, "duration", lambda p: 99.0)
+    claude = _claude_returning({"videos": [{"pieces": [i], "title": f"Look number {i} at the drone"} for i in range(5)],
+                                "dropped": []})
+    rendered = []
+    monkeypatch.setattr(media, "render", lambda video_path, out, start, end, fmt, captions, frame=None, **k: (
+        rendered.append((start, end, frame.kind)), out.parent.mkdir(parents=True, exist_ok=True),
+        out.write_bytes(b"c"), out)[3])
+    made = pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube")}, 5)
+    assert made == 4  # five were asked for, but the gradual start allows 4 today
+    assert [r[:2] for r in rendered] == [(0.0, 20.0), (20.0, 42.0), (42.0, 61.0), (61.0, 80.0)] and {r[2] for r in rendered} == {"blur"}
+    titles = [r["title"] for r in conn.execute("SELECT title FROM clips ORDER BY id")]
+    assert titles == [f"Look number {i} at the drone" for i in range(4)]  # different captions, none dropped as repeats
+    descriptions = [r["description"] for r in conn.execute("SELECT description FROM clips ORDER BY id")]
+    assert all(d.startswith(t + "\n#Ad") for d, t in zip(descriptions, titles))

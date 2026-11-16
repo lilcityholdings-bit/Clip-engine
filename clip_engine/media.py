@@ -314,7 +314,8 @@ def thumbnail(src: Path, out: Path, photo: bool) -> bytes:
     return out.read_bytes()
 
 
-def assemble(pieces: list[Path], out: Path, work: Path, budget: float = COMPILATION_DEFAULT_SEC) -> Path:
+def assemble(pieces: list[Path], out: Path, work: Path, budget: float = COMPILATION_DEFAULT_SEC,
+             audio: bool | None = None) -> Path:
     """Join videos and photos, in the order given, into one 1080x1920 video of 15 to `budget` seconds (30 or 59).
 
     Every piece is framed the same way (fitted over a blurred copy of itself), photos slowly zoom,
@@ -327,7 +328,8 @@ def assemble(pieces: list[Path], out: Path, work: Path, budget: float = COMPILAT
     lengths = [IMAGE_SEC if photo else duration(p) for p, photo in zip(pieces, kinds)]
     plan = plan_pieces(list(zip(kinds, lengths)), budget)
     pieces, kinds = pieces[:len(plan)], kinds[:len(plan)]
-    audio = any(not photo and has_audio(p) for p, photo in zip(pieces, kinds))
+    if audio is None:
+        audio = any(not photo and has_audio(p) for p, photo in zip(pieces, kinds))
     segments = []
     for i, (piece, photo, seconds) in enumerate(zip(pieces, kinds, plan)):
         seg = work / f"seg{i:02d}.mp4"
@@ -338,3 +340,26 @@ def assemble(pieces: list[Path], out: Path, work: Path, budget: float = COMPILAT
     _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", listing.name, "-c", "copy",
           "-movflags", "+faststart", str(out.resolve())], cwd=work)
     return out
+
+
+def assemble_many(groups: list[list[Path]], out: Path, work: Path,
+                  budget: float = COMPILATION_DEFAULT_SEC) -> tuple[Path, list[tuple[float, float]]]:
+    """Several different videos at once. Each group of pieces is assembled by itself (15 to `budget` seconds) and
+    the finished videos are joined into one long working file. Returns that file and each video's (start, end)
+    inside it, so every video can be cut out and posted on its own."""
+    from . import manual
+    work.mkdir(parents=True, exist_ok=True)
+    # one soundtrack setting for all of them, or the joined file would mix videos with and without audio
+    audio = any(not manual.is_image(p) and has_audio(p) for group in groups for p in group)
+    built = [assemble(group, work / f"video{i}.mp4", work / f"group{i}", budget, audio=audio)
+             for i, group in enumerate(groups)]
+    windows, at = [], 0.0
+    for video in built:
+        length = duration(video)
+        windows.append((round(at, 2), round(at + length, 2)))
+        at += length
+    listing = work / "videos.txt"
+    listing.write_text("".join(f"file '{v.name}'\n" for v in built), encoding="utf-8")
+    _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", listing.name, "-c", "copy",
+          "-movflags", "+faststart", str(out.resolve())], cwd=work)
+    return out, windows
