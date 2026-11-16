@@ -58,6 +58,7 @@ class Campaign:
     niche: str = ""           # what the creator's content is about, for trend research
     allow_music: bool = True  # False if the program forbids adding background music
     approved_captions: list[str] = field(default_factory=list)  # if set, a clip's caption is one of these, word for word, and nothing else
+    paid_label: bool = True  # False if the program forbids the platforms' own paid-promotion / paid-partnership switches
     disclosure_line: str = ""  # e.g. "#Ad": the caption is the text, then this alone on the next line, then at most 3 hashtags
     active: bool = True
     ends_on: str | None = None
@@ -191,6 +192,7 @@ def from_form(form: dict[str, str], platforms: list[str]) -> Campaign:
         allow_music=form.get("allow_music") == "on",
         approved_captions=approved_captions(form.get("approved_captions", "")),
         disclosure_line=_disclosure(form.get("disclosure_line", "")),
+        paid_label=form.get("paid_label") == "on",
         active=form.get("active", "on") == "on",
         ends_on=ends_on,
     )

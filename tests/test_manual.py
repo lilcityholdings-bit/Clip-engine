@@ -571,3 +571,49 @@ def test_clips_under_a_disclosure_line_campaign_have_nothing_else_in_the_caption
     row = conn.execute("SELECT title, description FROM clips ORDER BY id LIMIT 1").fetchone()
     assert row["title"] == "Heismay in action"
     assert row["description"] == "Heismay in action\n#Ad\n#podcast"  # no credit line, no #Shorts, no link
+
+
+# --- a campaign that bans paid promotion: no paid-promotion switch, no added sound, no more than 5 clips per video ---
+
+def test_paid_label_is_a_campaign_choice(tmp_path):
+    form = {"name": "Sega", "program_url": "https://w", "rate": "1"}
+    assert campaigns.from_form({**form, "paid_label": "on"}, ["tiktok"]).paid_label is True
+    assert campaigns.from_form(form, ["tiktok"]).paid_label is False  # an unticked box is not sent
+    assert campaigns.Campaign(id="a", name="a", program_url="u", rate_per_1k_views=1, sources=[]).paid_label is True
+
+
+def test_publishing_follows_the_campaigns_paid_label_choice(tmp_path):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+    settings = Settings(data_dir=tmp_path)
+    conn = db.connect(tmp_path / "p.db")
+    campaigns.save(tmp_path, campaigns.Campaign(id="ring", name="Ring", program_url="https://w", rate_per_1k_views=1, sources=[]))
+    campaigns.save(tmp_path, campaigns.Campaign(id="sega", name="Sega", program_url="https://w", rate_per_1k_views=1,
+                                                sources=[], paid_label=False))
+    video = tmp_path / "c.mp4"
+    video.write_bytes(b"x")
+    for cid in ("ring", "sega"):
+        clip = conn.execute("INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description,"
+                            " tags, arms, file_path, media_token) VALUES ('s', ?, 0, 1, 't', 'd', '[]', '{}', ?, ?)",
+                            (cid, str(video), cid * 8)).lastrowid
+        conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'youtube', 'queued',"
+                     " datetime('now'))", (clip,))
+    conn.commit()
+    pub = FakePub("youtube")
+    assert pipeline.publish_due(conn, settings, {"youtube": pub}) == 2
+    flags = {c["campaign_id"]: c["paid_label"] for c, _, _ in pub.published}
+    assert flags == {"ring": True, "sega": False}
+
+
+def test_hand_posting_tips_follow_the_campaign_rules():
+    ring = campaigns.Campaign(id="r", name="R", program_url="u", rate_per_1k_views=1, sources=[])
+    sega = campaigns.Campaign(id="s", name="S", program_url="u", rate_per_1k_views=1, sources=[], allow_music=False,
+                              paid_label=False)
+    assert "trending sound" in dashboard.app_tip("tiktok", ring) and "Paid partnership" in dashboard.app_tip("tiktok", ring)
+    tip = dashboard.app_tip("tiktok", sega)
+    assert "Don't add any sound" in tip and "Don't switch on any paid-partnership" in tip and "Paid partnership)" not in tip
+    assert "trending sound" in dashboard.app_tip("tiktok", None) and dashboard.app_tip("youtube", sega).startswith("YouTube app")
+
+
+def test_one_upload_makes_at_most_five_clips(tmp_path, monkeypatch):
+    assert pipeline.MAX_CLIPS_PER_UPLOAD == 5

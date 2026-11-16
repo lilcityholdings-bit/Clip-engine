@@ -6,7 +6,7 @@ Last updated 2026-11-16. The plain-language state of the product, for the owner,
 
 An automated clipping business. Creators in paid clipping programs (for example Whop Content Rewards) pay per 1,000 views for short clips of their videos. Clip Engine finds the creator's newest videos, cuts the best moments into Shorts with word-by-word captions, writes titles, hashtags and #ad disclosure, posts or prepares them for YouTube, TikTok and Instagram, tracks views and estimated earnings, and learns which choices earn the most (Thompson sampling).
 
-- Code: github.com/lilcityholdings-bit/Clip-engine (branch `main`). Tests: `python -m pytest` (169 passing).
+- Code: github.com/lilcityholdings-bit/Clip-engine (branch `main`). Tests: `python -m pytest` (173 passing).
 - Hosting: Railway project `clip-engine`, service `clip-engine` (always on, about 100 MB idle), volume `clip-engine-data` at `/data`. See README, Keeping Railway costs down. A leftover `wake-clip-engine` cron service from a sleep-mode trial should be deleted.
 - Dashboard: https://clip-engine-production-f966.up.railway.app (password = Railway variable `DASHBOARD_PASSWORD`).
 - Setup, deploy and platform docs: `README.md`. Secrets and incident procedure: `SECURITY.md`. Accounts: `docs/ASSETS.md`.
@@ -14,7 +14,7 @@ An automated clipping business. Creators in paid clipping programs (for example 
 ## Where things stand
 
 Done
-- Engine built, tested (169 passing) and running on Railway, always on at about 80 MB idle. Review mode on (nothing posts without approval); gradual start (4 clips/day in week 1, then 6). Currently PAUSED on purpose until the first campaign is added.
+- Engine built, tested (173 passing) and running on Railway, always on at about 80 MB idle. Review mode on (nothing posts without approval); gradual start (4 clips/day in week 1, then 6). Currently PAUSED on purpose until the first campaign is added.
 - YouTube: channel @littlecityclips connected, test upload passed (not forced private), automatic posting on. No Google audit needed.
 - Claude API: Anthropic organization "Little City Digital LLC" (Console), $25 monthly spend limit, key added in Railway as ANTHROPIC_API_KEY. Engine uses claude-opus-5-5.
 - Security after Railway's 2026-10-21 breach: rotated the Google client secret and dashboard password, cancelled and reconnected the YouTube login, Railway passkey 2FA. Disconnect-YouTube button and password lockout added.
@@ -23,7 +23,7 @@ Done
 
 Campaigns
 - Ring - Drone Launch Clipping: added on the dashboard (approved captions).
-- SEGA - Metaphor ReFantazio Trailer Clipping (gaming niche focus from 2026-11-16): set in the Railway variable CAMPAIGNS_JSON (id sega-metaphor), not on the dashboard, so the dashboard can't delete it; edit the variable to change it. Pays on YouTube Shorts, TikTok and Instagram: up to $2.00 / up to $2.00 / $1.50 per 1,000 views, payout $2 min and $800 max per platform; views from Pakistan, India and Bangladesh aren't paid, and the audience must be at least 50% USA. Captions: text, then #Ad alone on the next line, then at most 3 related hashtags (Disclosure on its own line). Source videos: the Heismay Character Trailer (Frame.io link, download and upload it); the Launch Trailer link is still to be added by the campaign. Rest of the rules (clip length, not allowed) not yet reviewed.
+- SEGA - Metaphor ReFantazio Trailer Clipping (gaming niche focus from 2026-11-16): set in the Railway variable CAMPAIGNS_JSON (id sega-metaphor), not on the dashboard, so the dashboard can't delete it; edit the variable to change it. Pays on YouTube Shorts, TikTok and Instagram: up to $2.00 / up to $2.00 / $1.50 per 1,000 views, payout $2 min and $800 max per platform; views from Pakistan, India and Bangladesh aren't paid, and the audience must be at least 50% USA. Captions: text, then #Ad alone on the next line, then at most 3 related hashtags (Disclosure on its own line). Source videos: the Heismay Character Trailer (Frame.io link, download and upload it); the Launch Trailer link is still to be added by the campaign. Rules reviewed 2026-11-16: posts must stay live 30 days (never delete them), likes must be visible, 0.50% minimum engagement (5 likes per 1,000 views), no shipping or romance, no violence, no exaggerated or rage-bait hooks, no made-up facts, call it a trailer (never gameplay), original audio must stay audible, no AI voices, no paid promotion or ads of any kind (permanent ban; so paid_label is false for this campaign: no YouTube paid-promotion switch, no TikTok/Instagram branded-content switch, no boosting), same video at most 5 posts. If unsure, ask the Clipping Culture team, not SEGA.
 
 Open, in order
 0. Campaigns with approved captions (Ring - Drone Launch, from 2026-11-10): Approved captions box added 2026-11-11. Silent footage is cut by shot changes (added 2026-11-11). Since 2026-11-15 the YouTube paid-promotion label is requested on upload (paidProductPlacementDetails); not yet confirmed on a real upload. Shorts YouTube doesn't confirm are listed on the dashboard to tick by hand.

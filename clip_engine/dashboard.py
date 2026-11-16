@@ -358,6 +358,7 @@ def _campaign_form(values: dict | None, editing: bool, open_form: bool) -> str:
     if isinstance(captions, list):
         captions = "\n".join(captions)
     music_checked = " checked" if v.get("allow_music", True) not in (False, "off") else ""
+    paid_checked = " checked" if v.get("paid_label", True) not in (False, "off") else ""
     active_checked = " checked" if v.get("active", True) not in (False, "off") else ""
     title = "Edit campaign" if editing else "Add a campaign"
     return f"""<details id="campaign-form"{" open" if open_form else ""} style="margin-top:12px"><summary>{title}</summary>
@@ -382,6 +383,7 @@ def _campaign_form(values: dict | None, editing: bool, open_form: bool) -> str:
 <label>Platforms it pays for</label><div class="checks">{checks}</div>
 <label>Options</label><div class="checks">
 <label><input type="checkbox" name="allow_music"{music_checked}> Background music allowed</label>
+<label><input type="checkbox" name="paid_label"{paid_checked}> Use the apps' own paid-promotion switch <small>(untick if the campaign bans "paid promotion or ads of any kind"; the caption's #Ad is then the disclosure)</small></label>
 <label><input type="checkbox" name="active"{active_checked}> Live</label></div>
 <label>End date <small>optional</small></label><input type="date" name="ends_on" value="{val("ends_on")}">
 <div class="row" style="margin-top:14px"><button class="primary">Save campaign</button>
@@ -460,11 +462,21 @@ function copyText(id, btn) {
 
 APP_TIPS = {
     "youtube": "YouTube app: + → Short → upload the video, paste the title, then paste the caption as the description.",
-    "tiktok": "TikTok app: + → Upload → pick the video. Add a trending sound if you like, keeping it quiet under the "
-              "speech, then paste the caption. If it's a paid campaign, switch on Content disclosure → Paid partnership.",
-    "instagram": "Instagram app: + → Reel → pick the video. Add a trending sound if you like, keeping it quiet, then "
-                 "paste the caption. If it's a paid campaign, add the Paid partnership label.",
+    "tiktok": "TikTok app: + → Upload → pick the video. {sound}, then paste the caption. {label}",
+    "instagram": "Instagram app: + → Reel → pick the video. {sound}, then paste the caption. {label}",
 }
+SOUND_OK = "Add a trending sound if you like, keeping it quiet under the speech"
+SOUND_NO = "Don't add any sound or music: the campaign wants the original audio only"
+LABEL_ON = "If it's a paid campaign, switch on Content disclosure → Paid partnership (TikTok) or add the Paid partnership label (Instagram)."
+LABEL_OFF = ("Don't switch on any paid-partnership, branded-content or ad option for this campaign, and don't boost "
+             "the post: it bans paid promotion, and the #Ad in the caption is the disclosure. Keep likes visible.")
+
+
+def app_tip(platform: str, campaign: "campaigns.Campaign | None") -> str:
+    """How to post by hand on one app, following the campaign's rules about sound and paid-promotion switches."""
+    tip = APP_TIPS.get(platform, "")
+    return tip.format(sound=SOUND_OK if campaign is None or campaign.allow_music else SOUND_NO,
+                      label=LABEL_ON if campaign is None or campaign.paid_label else LABEL_OFF)
 
 
 def post_time_label(scheduled_at: str | None, now: datetime | None = None) -> str:
@@ -484,7 +496,8 @@ def _ready(conn, settings: Settings) -> str:
     if not clips:
         return ""
     e = html.escape
-    names = {c.id: c.name for c in campaigns.load(settings.data_dir)}
+    camps = campaigns.by_id(campaigns.load(settings.data_dir))
+    names = {i: camp.name for i, camp in camps.items()}
     cards = []
     for c in clips:
         cid = c["id"]
@@ -493,7 +506,7 @@ def _ready(conn, settings: Settings) -> str:
         for p in c["posts"]:
             name = PLATFORM_NAMES.get(p["platform"], p["platform"])
             platforms_html.append(
-                f'<div class="card"><b>{name}</b><div class="muted">{e(APP_TIPS.get(p["platform"], ""))}</div>'
+                f'<div class="card"><b>{name}</b><div class="muted">{e(app_tip(p["platform"], camps.get(c["campaign_id"])))}</div>'
                 f'<form method="post" action="/manual/save" class="row" style="margin-top:6px">'
                 f'<input type="hidden" name="id" value="{p["id"]}">'
                 f'<input type="url" name="url" required placeholder="Paste your {name} post link" style="flex:1 1 200px">'
@@ -1087,7 +1100,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     campaign = campaigns.from_form(form, raw.get("platforms", []))
                 except campaigns.CampaignError as exc:
                     values = {**form, "rate_per_1k_views": form.get("rate", ""), "platforms": raw.get("platforms", []),
-                              "allow_music": form.get("allow_music", "off"), "active": form.get("active", "off")}
+                              "allow_music": form.get("allow_music", "off"), "paid_label": form.get("paid_label", "off"), "active": form.get("active", "off")}
                     return self._page(error=str(exc), form_values=values)
                 existed = campaign.id in by_id
                 campaigns.save(settings.data_dir, campaign)

@@ -396,6 +396,7 @@ def snap_to_words(clip: dict, words: list[dict]) -> dict:
 
 
 MAX_UPLOAD_ATTEMPTS = 3
+MAX_CLIPS_PER_UPLOAD = 5  # campaigns count the same footage posted more than 5 times as spam
 STALE_STATUS_MINUTES = 45
 
 
@@ -469,7 +470,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                     "upload." if live else "Add a campaign first.")
         return 0
     if job.item:
-        remaining = left_today  # a video you handed over is used once, so take all of today's clips from it
+        remaining = min(left_today, MAX_CLIPS_PER_UPLOAD)  # a video you handed over is used once, so take today's clips from it, up to 5
     src, arms, campaign = job.src, job.arms, job.campaign
     log.info("plan %s using %s", arms, src.identifier)
 
@@ -616,6 +617,7 @@ def publish_due(conn: sqlite3.Connection, settings: Settings, publishers: dict) 
         " WHERE p.status = 'queued' AND p.scheduled_at <= datetime('now') ORDER BY p.scheduled_at"
     ).fetchall()
     posted = 0
+    camps = campaigns.by_id(campaigns.load(settings.data_dir))
     for row in due:
         pub = publishers.get(row["platform"])
         if pub is None:
@@ -624,10 +626,14 @@ def publish_due(conn: sqlite3.Connection, settings: Settings, publishers: dict) 
             continue
         path = Path(row["file_path"] or "")
         public_url = f"{settings.public_base_url}/media/{row['media_token']}.mp4" if settings.public_base_url else ""
+        clip = dict(row)
+        campaign = camps.get(row["campaign_id"])
+        if campaign is not None:
+            clip["paid_label"] = campaign.paid_label
         try:
             if not path.exists():
                 raise PublishError("rendered file is missing")
-            external_id, url = pub.publish(dict(row), path, public_url)
+            external_id, url = pub.publish(clip, path, public_url)
         except Exception as exc:
             attempts = row["attempts"] + 1
             status = "failed" if attempts >= MAX_ATTEMPTS else "queued"

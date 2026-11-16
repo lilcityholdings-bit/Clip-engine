@@ -47,7 +47,7 @@ class YouTubePublisher:
         self.on_label_missing = on_label_missing  # called when a paid clip lacks the paid-promotion label
 
     def publish(self, clip: dict, path: Path, public_url: str) -> tuple[str, str]:
-        paid = bool(clip.get("campaign_id"))  # every campaign clip is a paid clip
+        paid = bool(clip.get("paid_label", bool(clip.get("campaign_id"))))  # campaign clips are paid clips unless the campaign bans the switch
         video_id = self.yt.upload(path, clip["title"], clip["description"], json.loads(clip["tags"]), paid=paid)
         if paid and self.on_label_missing and getattr(self.yt, "last_paid_label", None) is not True:
             self.on_label_missing(video_id)
