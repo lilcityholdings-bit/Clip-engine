@@ -742,3 +742,99 @@ def test_strict_caption_campaigns_tell_claude_to_stay_plain_and_true():
                                 disclosure_line="#Ad")
     assert pipeline.caption_rules(plain) == "No gore." and pipeline.caption_rules(None) == ""
     assert pipeline.caption_rules(strict).startswith("No gore.") and "Quote only words" in pipeline.caption_rules(strict)
+
+
+# --- posting a clip again -------------------------------------------------------------------------------
+
+def _posted_clip(conn, tmp_path, platforms=("tiktok",), campaign="pod", created="now"):
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"v")
+    cid = conn.execute(
+        "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms, file_path,"
+        " media_token, created_at) VALUES ('s', ?, 0, 1, 'Heismay clip', 'd', '[]', '{}', ?, ?, datetime('now', ?))",
+        (campaign, str(f), "t" * 32, "-0 days" if created == "now" else created)).lastrowid
+    for p in platforms:
+        conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at, url) VALUES (?, ?, 'posted', datetime('now'),"
+                     " 'https://x')", (cid, p))
+    conn.commit()
+    return cid, f
+
+
+def test_a_posted_campaign_clip_is_kept_for_two_weeks_then_deleted(tmp_path):
+    conn = db.connect(tmp_path / "r.db")
+    cid, f = _posted_clip(conn, tmp_path)
+    pipeline.cleanup_files(conn)
+    assert f.exists()  # kept so it can be posted again
+    conn.execute("UPDATE clips SET created_at = datetime('now', '-15 days') WHERE id = ?", (cid,))
+    pipeline.cleanup_files(conn)
+    assert not f.exists()
+    cid2, f2 = _posted_clip(conn, tmp_path, campaign=None)  # not a campaign clip: nothing to resubmit
+    pipeline.cleanup_files(conn)
+    assert not f2.exists()
+    cid3, f3 = _posted_clip(conn, tmp_path)
+    conn.execute("UPDATE posts SET status = 'rejected' WHERE clip_id = ?", (cid3,))
+    pipeline.cleanup_files(conn)
+    assert not f3.exists()  # never posted: deleted at once
+
+
+def test_repost_puts_the_clip_back_under_ready_to_post_up_to_five_times(tmp_path):
+    conn = db.connect(tmp_path / "r.db")
+    db.put(conn, "auto_platforms", "youtube")
+    cid, f = _posted_clip(conn, tmp_path, platforms=("youtube", "tiktok"))
+    [c] = pipeline.repostable(conn)
+    assert c["platforms"] == ["youtube", "tiktok"] and c["left"] == 3
+    assert pipeline.repost(conn, cid, "tiktok") == "ready"
+    assert [x["platform"] for x in pipeline.ready_to_post(conn)[0]["posts"]] == ["tiktok"]
+    assert pipeline.repostable(conn)[0]["platforms"] == ["youtube"]  # tiktok already has one waiting
+    with pytest.raises(ValueError, match="can't be posted again"):
+        pipeline.repost(conn, cid, "tiktok")
+    assert pipeline.repost(conn, cid, "youtube") == "queued"  # an automatic account posts it by itself
+    [q] = pipeline.scheduled_posts(conn)
+    assert q["platform"] == "youtube"
+    conn.execute("UPDATE posts SET status = 'posted' WHERE status IN ('ready', 'queued')")
+    conn.commit()
+    assert pipeline.repost(conn, cid, "tiktok") == "ready"  # the 5th post of this clip
+    assert pipeline.repostable(conn) == []  # that is the limit
+    f.unlink()
+    conn.execute("UPDATE posts SET status = 'posted'")
+    assert pipeline.repostable(conn) == []  # and a clip whose video is gone can't be reposted
+
+
+def test_post_again_section_and_route(server, tmp_path, monkeypatch):
+    base, conn = server
+    _campaign(tmp_path)
+    cid, f = _posted_clip(conn, tmp_path)
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Post a clip again" in page and "Post again on TikTok" in page and "30 minutes" in page
+    page = _get(base + "/repost", "s3cret", data=f"id={cid}&platform=tiktok".encode()).read().decode()
+    assert "Added under Ready to post" in page and "Ready to post from your phone" in page
+    bad = _get(base + "/repost", "s3cret", data=f"id={cid}&platform=tiktok".encode()).read().decode()
+    assert "be posted again" in bad
+
+
+def test_an_old_database_is_migrated_to_allow_reposting_without_losing_posts(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE clips (id INTEGER PRIMARY KEY);
+        CREATE TABLE posts (
+            id INTEGER PRIMARY KEY, clip_id INTEGER NOT NULL REFERENCES clips(id), platform TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued', scheduled_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+            external_id TEXT, url TEXT, error TEXT, posted_at TEXT, views INTEGER, submitted_at TEXT,
+            UNIQUE (clip_id, platform));
+        INSERT INTO clips (id) VALUES (1);
+        INSERT INTO posts (id, clip_id, platform, status, scheduled_at, url, views)
+            VALUES (7, 1, 'tiktok', 'posted', '2026-11-16 12:00:00', 'https://tiktok.com/t/abc', 18);
+    """)
+    old.commit()
+    old.close()
+    conn = db.connect(path)
+    assert [tuple(r) for r in conn.execute("SELECT id, platform, status, url, views FROM posts")] == \
+        [(7, "tiktok", "posted", "https://tiktok.com/t/abc", 18)]
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (1, 'tiktok', 'ready', 'now')")  # again
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):  # but only one open post at a time
+        conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (1, 'tiktok', 'queued', 'now')")
+    conn.rollback()
+    assert db.connect(path).execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 2  # reconnecting changes nothing

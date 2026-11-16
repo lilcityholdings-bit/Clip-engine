@@ -470,8 +470,8 @@ def test_phone_posting_flow(server, tmp_path):
     from clip_engine import pipeline
     [pending] = pipeline.pending_submissions(conn)
     assert pending["url"] == "https://youtube.com/shorts/abc"
-    assert not (tmp_path / "clips" / ("c" * 32 + ".mp4")).exists()  # nothing left to post: file removed
-    assert "Ready to post" not in _get(base + "/", "s3cret").read().decode()
+    assert (tmp_path / "clips" / ("c" * 32 + ".mp4")).exists()  # a posted campaign clip is kept so it can be posted again
+    assert "Ready to post from your phone" not in _get(base + "/", "s3cret").read().decode()
 
 
 def test_download_header(server):

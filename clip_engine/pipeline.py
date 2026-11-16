@@ -735,16 +735,58 @@ def publish_due(conn: sqlite3.Connection, settings: Settings, publishers: dict) 
     return posted
 
 
+REPOST_DAYS = 14          # a campaign clip's video is kept this long so it can be posted again
+MAX_POSTS_PER_CLIP = 5    # campaigns often count the same video posted more than 5 times as spam
+
+
 def cleanup_files(conn: sqlite3.Connection) -> None:
-    """Delete rendered files once no post of that clip is still queued."""
+    """Delete rendered files once no post of that clip is still queued. A campaign clip that was posted keeps its
+    file for REPOST_DAYS so it can be posted again (for example when a submission window was missed); clips that
+    were rejected, skipped or never posted are deleted at once."""
     rows = conn.execute(
         "SELECT id, file_path FROM clips WHERE file_path IS NOT NULL AND NOT EXISTS"
         " (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status IN ('queued', 'review', 'ready'))"
+        " AND (campaign_id IS NULL OR created_at < datetime('now', ?) OR NOT EXISTS"
+        " (SELECT 1 FROM posts WHERE posts.clip_id = clips.id AND posts.status = 'posted'))", (f"-{REPOST_DAYS} days",)
     ).fetchall()
     for r in rows:
         Path(r["file_path"]).unlink(missing_ok=True)
         conn.execute("UPDATE clips SET file_path = NULL WHERE id = ?", (r["id"],))
     conn.commit()
+
+
+def repostable(conn: sqlite3.Connection) -> list[dict]:
+    """Recent campaign clips whose video is still here and that may still be posted again, with the
+    accounts each can go to (those it was made for, without an open post already)."""
+    clips = conn.execute(
+        "SELECT id, title, campaign_id, file_path FROM clips WHERE campaign_id IS NOT NULL AND file_path IS NOT NULL"
+        " AND created_at >= datetime('now', ?) ORDER BY id DESC", (f"-{REPOST_DAYS} days",)).fetchall()
+    out = []
+    for c in clips:
+        if not Path(c["file_path"]).exists():
+            continue
+        posts = conn.execute("SELECT platform, status FROM posts WHERE clip_id = ?", (c["id"],)).fetchall()
+        used = sum(p["status"] in ("posted", "ready", "queued") for p in posts)
+        busy = {p["platform"] for p in posts if p["status"] in ("ready", "queued")}
+        platforms = [p for p in ALL_PLATFORMS if p in {x["platform"] for x in posts} and p not in busy]
+        if platforms and used < MAX_POSTS_PER_CLIP:
+            out.append({"id": c["id"], "title": c["title"], "campaign_id": c["campaign_id"], "platforms": platforms,
+                        "left": MAX_POSTS_PER_CLIP - used})
+    return out
+
+
+def repost(conn: sqlite3.Connection, clip_id: int, platform: str) -> str:
+    """Post a clip again on one account. Hand-posted accounts get it under Ready to post; an automatic
+    account posts it at the next check. Returns "ready" or "queued"."""
+    for c in repostable(conn):
+        if c["id"] == clip_id and platform in c["platforms"]:
+            status = "queued" if platform in auto_platforms(conn) else "ready"
+            conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, ?, ?, datetime('now'))",
+                         (clip_id, platform, status))
+            conn.commit()
+            return status
+    raise ValueError("That clip can't be posted again: it is already waiting to be posted, it was posted "
+                     f"{MAX_POSTS_PER_CLIP} times, or its video is gone.")
 
 
 def score(conn: sqlite3.Connection, settings: Settings, publishers: dict) -> int:

@@ -43,9 +43,11 @@ CREATE TABLE IF NOT EXISTS posts (
     error TEXT,
     posted_at TEXT,
     views INTEGER,
-    submitted_at TEXT,                -- when the link was sent for campaign submission
-    UNIQUE (clip_id, platform)
+    submitted_at TEXT                 -- when the link was sent for campaign submission
 );
+-- One open post per clip and account at a time; a clip may be posted again once the earlier post is done.
+CREATE UNIQUE INDEX IF NOT EXISTS posts_open ON posts (clip_id, platform)
+    WHERE status IN ('review', 'queued', 'ready');
 CREATE TABLE IF NOT EXISTS arm_stats (
     dimension TEXT NOT NULL,
     arm TEXT NOT NULL,
@@ -70,7 +72,48 @@ def connect(path: Path | str) -> sqlite3.Connection:
     if str(path) != ":memory:":
         conn.execute("PRAGMA journal_mode=WAL")  # dashboard reads while the worker writes
     conn.executescript(SCHEMA)
+    _migrate_posts(conn)
     return conn
+
+
+OLD_POSTS_UNIQUE = "UNIQUE (clip_id, platform)"
+
+
+def _migrate_posts(conn: sqlite3.Connection) -> None:
+    """Older databases allowed only one post per clip and account for ever. Rebuild the table without that
+    rule (keeping every row) so a clip can be posted again."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'posts'").fetchone()
+    if not row or OLD_POSTS_UNIQUE not in row["sql"]:
+        return
+    try:
+        conn.executescript("""
+            BEGIN IMMEDIATE;
+            ALTER TABLE posts RENAME TO posts_old;
+            CREATE TABLE posts (
+                id INTEGER PRIMARY KEY,
+                clip_id INTEGER NOT NULL REFERENCES clips(id),
+                platform TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                scheduled_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                external_id TEXT,
+                url TEXT,
+                error TEXT,
+                posted_at TEXT,
+                views INTEGER,
+                submitted_at TEXT
+            );
+            INSERT INTO posts (id, clip_id, platform, status, scheduled_at, attempts, external_id, url, error,
+                               posted_at, views, submitted_at)
+                SELECT id, clip_id, platform, status, scheduled_at, attempts, external_id, url, error,
+                       posted_at, views, submitted_at FROM posts_old;
+            DROP TABLE posts_old;
+            CREATE UNIQUE INDEX IF NOT EXISTS posts_open ON posts (clip_id, platform)
+                WHERE status IN ('review', 'queued', 'ready');
+            COMMIT;
+        """)
+    except sqlite3.OperationalError:
+        conn.rollback()  # another process is migrating right now; the next connection will find it done
 
 
 def get(conn: sqlite3.Connection, key: str, default: str | None = None) -> str | None:

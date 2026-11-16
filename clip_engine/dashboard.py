@@ -9,6 +9,7 @@ POST /manual/save, /manual/skip   record (or skip) a clip you posted yourself fr
 POST /settings/review, /settings/ramp, /settings/youtube-auto, /settings/youtube-test   switch review mode / gradual start on or off
 POST /settings/post-to  accounts new clips are made for
 POST /labels/done   clear the list of YouTube Shorts waiting for the paid-promotion tick
+POST /repost   post a recent campaign clip again on one account
 POST /post/now   send one queued automatic post at the next check instead of its scheduled time
 POST /settings/youtube-disconnect   cancel the saved YouTube login at Google and forget it
 POST /campaigns/save   add or update a campaign from the form
@@ -114,6 +115,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 {review}
 {ready}
 {scheduled}
+{repost}
 <section><div class="row">
 <div class="stat"><b>${earned}</b><span>estimated earnings</span></div>
 <div class="stat"><b>{views}</b><span>total views</span></div>
@@ -459,6 +461,30 @@ def _scheduled(conn, settings: Settings) -> str:
             f'sooner.</p>{"".join(rows)}</section>')
 
 
+def _repost(conn, settings: Settings) -> str:
+    """Post a recent campaign clip again, for example when a campaign's submit window was missed."""
+    clips = pipeline.repostable(conn)
+    if not clips:
+        return ""
+    e = html.escape
+    names = {c.id: c.name for c in campaigns.load(settings.data_dir)}
+    rows = []
+    for c in clips:
+        buttons = "".join(
+            f'<form method="post" action="/repost" class="inline"><input type="hidden" name="id" value="{c["id"]}">'
+            f'<input type="hidden" name="platform" value="{p}"><button>Post again on {e(PLATFORM_NAMES.get(p, p))}</button></form> '
+            for p in c["platforms"])
+        rows.append(f'<div class="card"><b>{e(c["title"])}</b>'
+                    f'<div class="muted">{e(names.get(c["campaign_id"], c["campaign_id"]))} &middot; '
+                    f'{c["left"]} more post{"s" if c["left"] != 1 else ""} allowed</div>'
+                    f'<div class="row" style="margin-top:6px">{buttons}</div></div>')
+    return ('<section id="repost"><h2>Post a clip again</h2>'
+            '<p class="muted">For when you missed a campaign\'s submit window (some only take a post submitted within '
+            '30 minutes), or lost the post. Tap one and it appears under Ready to post. Leave the earlier post up: '
+            f'campaigns can reject removed posts. Clips are kept {pipeline.REPOST_DAYS} days, up to '
+            f'{pipeline.MAX_POSTS_PER_CLIP} posts each.</p>' + "".join(rows) + '</section>')
+
+
 COPY_JS = """<script>
 function copyText(id, btn) {
   const el = document.getElementById(id);
@@ -540,7 +566,8 @@ def _ready(conn, settings: Settings) -> str:
             f'{"".join(platforms_html)}</div>')
     return (f'<section id="ready"><h2>Ready to post from your phone ({len(clips)})</h2>'
             f'<p class="muted">Download the video, post it in each app with the caption, then paste the post\'s link '
-            f'here so the engine can track its views. Unposted clips are dropped after 7 days.</p>'
+            f'here so the engine can track its views. Unposted clips are dropped after 7 days. Some campaigns only accept a '
+            f'post submitted within 30 minutes: post, copy the link, submit it on the campaign page first, then save it here.</p>'
             f'{"".join(cards)}{COPY_JS}</section>')
 
 
@@ -696,6 +723,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
         review=_review(conn, settings),
         ready=_ready(conn, settings),
         scheduled=_scheduled(conn, settings),
+        repost=_repost(conn, settings),
         settings_html=_settings(conn, settings),
         campaigns=_campaign_rows(settings),
         own_video=_own_video(conn, settings),
@@ -1011,6 +1039,15 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                             return self._page(error=str(exc))
                 elif self.path == "/labels/done":
                     youtube.clear_label_todo(conn)
+                elif self.path == "/repost":
+                    form = self._form()
+                    try:
+                        status = pipeline.repost(conn, int(form.get("id", ["0"])[0] or 0), form.get("platform", [""])[0])
+                    except ValueError as exc:
+                        return self._page(error=str(exc))
+                    return self._redirect("/?" + urlencode({"notice": (
+                        "Added under Ready to post: download it, post it, and submit the link quickly." if status == "ready"
+                        else "It will be posted within 5 minutes.")}) + ("#ready" if status == "ready" else ""))
                 elif self.path == "/post/now":
                     pipeline.post_now(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/review/approve-all":
