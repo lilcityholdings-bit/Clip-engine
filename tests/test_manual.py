@@ -373,7 +373,9 @@ def test_short_videos_are_posted_whole_and_queued_videos_run_back_to_back(tmp_pa
 # --- several videos and photos made into one video -------------------------------------------
 
 def test_plan_pieces_fits_one_short():
-    assert media.plan_pieces([(True, 3), (False, 40), (True, 3)]) == [3.0, 15.0, 3.0]  # photo 3s, video's first 15s
+    assert media.plan_pieces([(True, 3), (False, 40), (True, 3)]) == [3.0, 40.0, 3.0]  # nothing is cut while it fits
+    assert media.plan_pieces([(False, 30)]) == [30.0]  # a single video keeps its whole length
+    assert media.plan_pieces([(False, 90)]) == [58.0]  # unless it is longer than a Short
     assert media.plan_pieces([(False, 1.0)]) == [1.0]  # a very short video is used whole
     many = media.plan_pieces([(True, 3)] * 30)  # 90s of photos: shortened, never below the minimum
     assert sum(many) <= media.COMPILATION_MAX_SEC and all(x >= media.MIN_IMAGE_SEC for x in many)
@@ -417,7 +419,7 @@ def test_assemble_builds_one_vertical_video_from_photos_and_a_video(tmp_path):
        str(tmp_path / "v.mp4"))
     out = media.assemble([tmp_path / "a.jpg", tmp_path / "v.mp4", tmp_path / "b.png"], tmp_path / "out.mp4", tmp_path / "w")
     assert media._dimensions(out) == (1080, 1920) and media.has_audio(out)
-    assert 9.5 < media.duration(out) < 10.5  # 3s photo + 4s video + 3s photo
+    assert 9.5 < media.duration(out) < 10.5  # 3s photo + the whole 4s video + 3s photo
     photos = media.assemble([tmp_path / "a.jpg", tmp_path / "b.png"], tmp_path / "p.mp4", tmp_path / "w2")
     assert not media.has_audio(photos) and 5.5 < media.duration(photos) < 6.5
 

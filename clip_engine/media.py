@@ -246,7 +246,6 @@ def render(video: Path, out: Path, start: float, end: float, fmt: str, captions:
 
 IMAGE_SEC = 3.0        # each photo is on screen this long (a slow zoom keeps it moving)
 MIN_IMAGE_SEC = 1.5
-VIDEO_MAX_SEC = 15.0   # the most taken from the start of any one video
 MIN_VIDEO_SEC = 2.0
 COMPILATION_MAX_SEC = 58.0  # the finished video must stay a Short
 
@@ -254,15 +253,15 @@ COMPILATION_MAX_SEC = 58.0  # the finished video must stay a Short
 def plan_pieces(pieces: list[tuple[bool, float]], budget: float = COMPILATION_MAX_SEC) -> list[float]:
     """Seconds to use from each (is_photo, length) piece so the whole fits in one Short.
 
-    Photos get IMAGE_SEC and videos their first VIDEO_MAX_SEC. When that is too long, everything is
-    shortened in proportion (never below a minimum), and if it still doesn't fit, the last pieces are dropped.
+    Photos get IMAGE_SEC and videos all of their length, so nothing is cut while it fits. When the total is
+    over the budget, everything is shortened in proportion (never below a minimum), videos from their start,
+    and if it still doesn't fit, the last pieces are dropped.
     """
-    want = [IMAGE_SEC if photo else min(length, VIDEO_MAX_SEC) for photo, length in pieces]
+    want = [IMAGE_SEC if photo else min(length, budget) for photo, length in pieces]
     if sum(want) > budget:
         scale = budget / sum(want)
-        want = [round(w * scale, 2) if photo else min(length, max(MIN_VIDEO_SEC, round(w * scale, 2)))
+        want = [max(MIN_IMAGE_SEC, round(w * scale, 2)) if photo else min(length, max(MIN_VIDEO_SEC, round(w * scale, 2)))
                 for (photo, length), w in zip(pieces, want)]
-        want = [max(MIN_IMAGE_SEC, w) if photo else w for (photo, _), w in zip(pieces, want)]
         while sum(want) > budget and len(want) > 1:
             want.pop()
     return want
