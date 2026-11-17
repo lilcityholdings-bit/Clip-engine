@@ -1,7 +1,12 @@
 """Claude calls: turn trends into search topics, and pick clip moments."""
+from __future__ import annotations
+
 import json
 
-import anthropic
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # the Anthropic library takes ~45 MB; only the clip-making process needs it
+    import anthropic
 
 from . import moments
 

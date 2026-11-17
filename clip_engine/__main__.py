@@ -12,7 +12,6 @@ import subprocess
 import sys
 import time
 
-import anthropic
 import requests
 
 from . import dashboard, db, manual, pipeline, platforms, strategy
@@ -26,6 +25,7 @@ TICK_MINUTES = 5
 KEEP_AWAKE_URL = "https://www.gstatic.com/generate_204"
 PRODUCE_EVERY_HOURS = 3
 SCORE_EVERY_HOURS = 1
+CLEANUP_EVERY_HOURS = 24  # delete leftover uploads and work files once a day
 CLIPS_PER_CYCLE = 2
 
 log = logging.getLogger("clip_engine")
@@ -103,6 +103,9 @@ def tick(conn, settings: Settings, pubs) -> None:
         return
     steps = [("publish", lambda: pipeline.publish_due(conn, settings, pubs)),
              ("alerts", lambda: pipeline.send_alerts(conn, settings.digest_webhook_url, settings.public_base_url))]
+    if not producing() and due(conn, "last_cleanup", CLEANUP_EVERY_HOURS):
+        # checked again when it runs: a clip run may have started in this same tick
+        steps.append(("cleanup", lambda: 0 if producing() else pipeline.cleanup_orphans(conn, settings)))
     if due(conn, "last_score", SCORE_EVERY_HOURS):
         steps += [("score", lambda: pipeline.score(conn, settings, pubs)),
                   ("views", lambda: pipeline.refresh_views(conn, pubs)),
@@ -154,6 +157,7 @@ def main(argv: list[str]) -> int:
     settings, yt, pubs = build_publishers(conn, base)
     if command == "produce":
         try:
+            import anthropic  # loaded only here, in the short-lived clip-making process
             made = pipeline.produce(conn, settings, anthropic.Anthropic(), yt, pubs, CLIPS_PER_CYCLE)
         except Exception as exc:
             log.exception("produce failed; will retry next cycle")

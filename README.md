@@ -114,7 +114,9 @@ Set `DIGEST_WEBHOOK_URL` to a Discord channel webhook (free; the Discord app giv
 
 Railway bills memory and CPU by the minute, so the always-on part is kept small:
 
-- Clips are made in a **separate process** (`python -m clip_engine produce`), so Whisper's memory (up to 3 GB) is released when it finishes. The always-on part (dashboard and scheduler) uses about 100 MB, down from about 800 MB.
+- Clips are made in a **separate process** (`python -m clip_engine produce`), so Whisper's memory (up to 3 GB; about 1.7 GB peak seen in November 2026) is released when it finishes. The always-on part (dashboard and scheduler) uses about 50 MB, down from about 800 MB.
+- The always-on part doesn't load the Anthropic library (about 45 MB), Whisper or OpenCV: only the clip-making process does (checked by a test).
+- Once a day (never during a clip run) leftover files are deleted: uploads nothing is waiting for (for example from an interrupted run), old work folders, and rendered clips no clip points to. Only files older than a day are touched.
 - Without `ANTHROPIC_API_KEY`, no clips are made at all, so nothing is downloaded or transcribed for nothing.
 - The heavy clip-making process is only started when there is something to clip: a video you added, or a live campaign with a channel to watch, and room under today's limit. With no campaign the engine idles instead of clipping archive films.
 - Videos with no audio track skip transcription, and speechless footage is cut without a Claude call.

@@ -1433,3 +1433,68 @@ def test_campaign_form_takes_the_submit_window_and_keep_days():
     for bad in ("x", "-5", "2000", "1.5"):
         with pytest.raises(campaigns.CampaignError, match="Submit within"):
             campaigns.from_form({**form, "submit_within_minutes": bad}, ["tiktok"])
+
+
+# --- Railway usage: a lean always-on process and no leftover files --------------------------------------------
+
+def test_the_always_on_process_does_not_load_the_anthropic_library():
+    import subprocess, sys
+    out = subprocess.run([sys.executable, "-c", "import sys, clip_engine.__main__, clip_engine.dashboard; "
+                          "print('anthropic' in sys.modules, 'faster_whisper' in sys.modules, 'cv2' in sys.modules)"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert out == "False False False"  # those load only in the clip-making process
+
+
+def test_cleanup_removes_only_old_files_nothing_uses(tmp_path):
+    import os, time
+    from clip_engine.config import Settings
+    settings = Settings(data_dir=tmp_path)
+    conn = db.connect(settings.db_path)
+    up = manual.upload_dir(tmp_path)
+    up.mkdir(parents=True)
+    (tmp_path / "clips").mkdir()
+    settings.work_dir.mkdir()
+    old = time.time() - 3 * 86400
+
+    def make(path, age=old, folder=False):
+        path.mkdir() if folder else path.write_bytes(b"x")
+        os.utime(path, (age, age))
+        return path
+    queued = make(up / "queued.mp4")
+    flying = make(up / "flying.mp4")
+    batched = make(up / "batched.jpg")
+    orphan = make(up / "orphan.mp4")
+    fresh = make(up / "fresh.mp4", age=time.time())
+    leftover_build = make(up / "build-abc", folder=True)
+    work = make(settings.work_dir / "abcd1234", folder=True)
+    clip_file = make(tmp_path / "clips" / ("k" * 32 + ".mp4"))
+    stray = make(tmp_path / "clips" / ("z" * 32 + ".mp4"))
+    manual.add(conn, {"kind": "file", "ref": str(queued), "campaign_id": "pod"})
+    manual.claim(conn, {"kind": "project", "files": [str(flying)], "campaign_id": "pod"})
+    manual.add_to_batch(conn, "batch1234", batched)
+    conn.execute("INSERT INTO clips (source_identifier, start_sec, end_sec, title, description, tags, arms, file_path)"
+                 " VALUES ('s', 0, 1, 't', 'd', '[]', '{}', ?)", (str(clip_file),))
+    conn.commit()
+    assert pipeline.cleanup_orphans(conn, settings) == 4
+    assert all(p.exists() for p in (queued, flying, batched, fresh, clip_file))
+    assert not any(p.exists() for p in (orphan, leftover_build, work, stray))
+
+
+def test_cleanup_runs_once_a_day_and_never_during_a_clip_run(tmp_path, monkeypatch):
+    from clip_engine import __main__ as main_mod
+    from clip_engine.config import Settings
+    settings = Settings(data_dir=tmp_path)
+    conn = db.connect(settings.db_path)
+    for name in ("publish_due", "score", "refresh_views", "send_digest", "send_alerts"):
+        monkeypatch.setattr(pipeline, name, lambda *a: 0)
+    calls = []
+    monkeypatch.setattr(pipeline, "cleanup_orphans", lambda c, s: calls.append(1) or 0)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(main_mod, "_producer", None)
+    main_mod.tick(conn, settings, {})
+    main_mod.tick(conn, settings, {})
+    assert calls == [1]  # once, not every 5 minutes
+    db.put(conn, "last_cleanup", "0")
+    monkeypatch.setattr(main_mod, "producing", lambda: True)
+    main_mod.tick(conn, settings, {})
+    assert calls == [1]  # not while clips are being made

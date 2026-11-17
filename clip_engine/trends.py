@@ -8,6 +8,8 @@ Two inputs, refreshed every TREND_TTL_HOURS per niche and cached in the kv table
 The brief goes into the clip-picking prompt and onto the dashboard. Trending sounds
 are reported, not used: they're copyrighted, and the posting APIs can't attach them.
 """
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -15,7 +17,10 @@ import sqlite3
 import time
 import xml.etree.ElementTree as ET
 
-import anthropic
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # the Anthropic library takes ~45 MB; only the clip-making process needs it
+    import anthropic
 import requests
 
 from . import db

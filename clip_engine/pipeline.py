@@ -5,6 +5,8 @@ Two source modes:
   of creators who pay per view, and learn which campaigns earn the most.
 - archive mode (no campaigns): clip public-domain videos from the Internet Archive.
 """
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
@@ -16,7 +18,10 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
-import anthropic
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # the Anthropic library takes ~45 MB; only the clip-making process needs it
+    import anthropic
 
 from . import ai, campaigns, db, manual, media, moments, policy, sources, strategy, trends
 from .config import Settings
@@ -900,6 +905,47 @@ def repost(conn: sqlite3.Connection, clip_id: int, platform: str) -> str:
             return status
     raise ValueError("That clip can't be posted again: it is already waiting to be posted, it was posted "
                      f"{MAX_POSTS_PER_CLIP} times, or its video is gone.")
+
+
+ORPHAN_HOURS = 24  # leftover files are only removed once they are this old, so nothing being written is touched
+
+
+def cleanup_orphans(conn: sqlite3.Connection, settings: Settings, now: float | None = None) -> int:
+    """Delete files nothing uses any more, so the volume doesn't slowly fill: uploads that are not waiting in the
+    queue, being clipped or part of an unfinished upload; leftover work folders; and rendered clips no clip points
+    to. Files newer than ORPHAN_HOURS are left alone. Returns how many were removed."""
+    import time as _time
+    cutoff = (now or _time.time()) - ORPHAN_HOURS * 3600
+    keep: set[Path] = set()
+    inflight = db.get(conn, manual.INFLIGHT_KEY, "")
+    for item in manual.queue(conn) + ([json.loads(inflight)] if inflight else []):
+        for ref in ([item["ref"]] if item.get("kind") == "file" else item.get("files", [])):
+            keep.add(Path(ref).resolve())
+    for batch in manual._batches(conn).values():
+        keep.update(Path(f).resolve() for f in batch["files"])
+    keep.update(Path(r[0]).resolve() for r in conn.execute("SELECT file_path FROM clips WHERE file_path IS NOT NULL"))
+
+    removed = 0
+
+    def old(path: Path) -> bool:
+        try:
+            return path.stat().st_mtime < cutoff
+        except OSError:
+            return False
+    for folder in (manual.upload_dir(settings.data_dir), settings.work_dir, settings.data_dir / "clips"):
+        if not folder.is_dir():
+            continue
+        for path in folder.iterdir():
+            if path.resolve() in keep or not old(path):
+                continue
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+            removed += 1
+    if removed:
+        log.info("removed %d leftover files", removed)
+    return removed
 
 
 def score(conn: sqlite3.Connection, settings: Settings, publishers: dict) -> int:
