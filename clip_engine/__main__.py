@@ -107,6 +107,11 @@ def tick(conn, settings: Settings, pubs) -> None:
         steps += [("score", lambda: pipeline.score(conn, settings, pubs)),
                   ("views", lambda: pipeline.refresh_views(conn, pubs)),
                   ("digest", lambda: pipeline.send_digest(conn, settings.digest_webhook_url))]
+    if not producing() and manual.recover_inflight(conn):
+        # The clip-making process died part-way (out of memory, killed) and never finished: retry your video.
+        pipeline.set_status(conn, "idle", "The last run stopped before it finished. Your video is back in line and is "
+                                          "being clipped again.")
+        db.put(conn, "run_now", "1")
     if can_produce() and not producing():
         asked = db.get(conn, "run_now") == "1"
         if asked or due(conn, "last_produce", PRODUCE_EVERY_HOURS):

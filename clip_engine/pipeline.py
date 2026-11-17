@@ -208,10 +208,14 @@ def _build_project(item: dict, campaign: campaigns.Campaign, claude: anthropic.A
             built, windows = media.assemble_many([g for g, _ in groups], out, work, budget)
             titles = [t for _, t in groups]
         else:
+            title = base
             if claude is not None and len(files) > 1:
-                files = arrange(claude, files, campaign, work)
+                if item.get("title"):
+                    files = arrange(claude, files, campaign, work)
+                else:  # no title typed: Claude orders the files and writes the caption in one go
+                    [(files, title)] = arrange_groups(claude, files, campaign, work, 1, base)[:1]
             built = media.assemble(files, out, work, budget)
-            windows, titles = [(0.0, media.duration(built))], [base]
+            windows, titles = [(0.0, media.duration(built))], [title]
     finally:
         shutil.rmtree(work, ignore_errors=True)
     src = sources.Source(
@@ -239,7 +243,8 @@ def arrange_groups(claude: anthropic.Anthropic | None, files: list[Path], campai
     and decides the split, the order and the captions. Any problem: an even split in upload order, captioned
     "<title> 1", "<title> 2" ..."""
     weights = [media.IMAGE_SEC if manual.is_image(f) else min(media.duration(f), media.COMPILATION_MAX_SEC) for f in files]
-    even = [([files[i] for i in run], f"{base} {n}") for n, run in enumerate(split_evenly(weights, count), 1)]
+    even = [([files[i] for i in run], f"{base} {n}" if count > 1 else base)
+            for n, run in enumerate(split_evenly(weights, count), 1)]
     if claude is None:
         return even
     try:
@@ -259,7 +264,7 @@ def arrange_groups(claude: anthropic.Anthropic | None, files: list[Path], campai
             if not picked:
                 continue
             used.update(picked)
-            title = manual.clean_text(v.get("title", ""), 100) or f"{base} {len(groups) + 1}"
+            title = manual.clean_text(v.get("title", ""), 100) or (f"{base} {len(groups) + 1}" if count > 1 else base)
             groups.append(([files[i] for i in picked], title))
         for d in result.get("dropped", []):
             log.info("left out piece %s: %s", d.get("piece"), d.get("why"))

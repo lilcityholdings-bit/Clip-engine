@@ -1273,3 +1273,62 @@ def test_a_single_video_in_a_combine_batch_is_cut_into_clips(tmp_path):
     manual.add_to_batch(conn, "onephoto11", photo)
     manual.finish_batch(conn, "onephoto11", {"campaign_id": "pod", "count": 1})
     assert manual.queue(conn)[-1]["kind"] == "project"
+
+
+# --- fixes: crashed runs, safe redirects, confirm before posting again, captions for untitled combined videos ------
+
+def test_a_run_that_died_part_way_is_retried_at_the_next_check(tmp_path, monkeypatch):
+    from clip_engine import __main__ as main_mod
+    from clip_engine.config import Settings
+    import subprocess
+    settings = Settings(data_dir=tmp_path)
+    conn = db.connect(settings.db_path)
+    _campaign(tmp_path)
+    for name, fn in (("publish_due", lambda *a: 0), ("score", lambda *a: 0), ("refresh_views", lambda *a: None),
+                     ("send_digest", lambda *a: 0), ("send_alerts", lambda *a: 0)):
+        monkeypatch.setattr(pipeline, name, fn)
+    monkeypatch.setattr(main_mod, "_producer", None)  # nothing running: the process that claimed the video is gone
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    started = []
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: started.append(cmd) or type("P", (), {"poll": lambda s: None})())
+    manual.claim(conn, {"kind": "file", "ref": "/x.mp4", "campaign_id": "pod"})
+    main_mod.tick(conn, settings, {"youtube": object()})
+    assert manual.queue(conn)[0]["ref"] == "/x.mp4" and started  # back in line and being clipped again
+    assert db.get(conn, manual.INFLIGHT_KEY) == ""
+
+
+def test_back_links_only_go_to_this_sites_own_pages():
+    for ok in ("/", "/#clips", "/clip/12", "/clip/12#top"):
+        assert dashboard.SAFE_BACK_RE.match(ok), ok
+    for bad in ("//evil.com", "/\\evil.com", "https://evil.com", "/clip/1/../../x", "/?x=1", "", "javascript:x"):
+        assert not dashboard.SAFE_BACK_RE.match(bad), bad
+
+
+def test_post_again_asks_before_posting(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    cid, _ = _posted_clip(conn, tmp_path, platforms=("youtube",))
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "return confirm(&quot;Post this clip again on YouTube? It goes up publicly within 5 minutes.&quot;)" in page
+    assert "return confirm(&quot;Post this clip again on YouTube?" in _get(f"{base}/clip/{cid}", "s3cret").read().decode()
+
+
+def test_an_untitled_combined_video_gets_claudes_caption_not_the_campaign_name(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub, _claude_returning
+
+    conn, _ = _produce_fixture(tmp_path, monkeypatch, {}, ["unused"])
+    db.put(conn, manual.QUEUE_KEY, "[]")
+    files = []
+    for name in ("a.jpg", "b.jpg"):
+        f = tmp_path / "uploads" / name
+        f.write_bytes(b"x")
+        files.append(str(f))
+    manual.add(conn, {"kind": "project", "files": files, "campaign_id": "pod", "creator": "", "title": "", "count": 1})
+    monkeypatch.setattr(media, "thumbnail", lambda src, out, photo: b"jpeg")
+    monkeypatch.setattr(media, "duration", lambda p: 10.0)
+    monkeypatch.setattr(media, "assemble", lambda files, out, work, budget=30.0: (out.write_bytes(b"c"), out)[1])
+    claude = _claude_returning({"videos": [{"pieces": [1, 0], "title": "The drone lifts off the dock"}], "dropped": []})
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube")}, 2) == 1
+    title = conn.execute("SELECT title FROM clips").fetchone()[0]
+    assert title == "The drone lifts off the dock"

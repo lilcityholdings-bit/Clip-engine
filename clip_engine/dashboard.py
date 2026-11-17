@@ -48,6 +48,8 @@ from .config import Settings
 log = logging.getLogger(__name__)
 MEDIA_RE = re.compile(r"^/media/([0-9a-f]{32})\.mp4$")
 CLIP_RE = re.compile(r"^/clip/(\d+)$")
+# where a form may send you afterwards: this site's own pages only ("/\\evil.com" would leave it)
+SAFE_BACK_RE = re.compile(r"^/(?:clip/\d+)?(?:#[a-z-]+)?$")
 RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 DIMENSIONS = {"music": "Music", "campaign": "Campaign", "topic": "Topic", "format": "Format", "length": "Clip length",
               "title_style": "Title style", "post_hour": "Posting time"}
@@ -508,7 +510,8 @@ def _clip_page(conn, settings: Settings, clip_id: int) -> str | None:
     if c["state"] == "posted" and c["has_video"]:
         again = next((x for x in pipeline.repostable(conn) if x["id"] == c["id"]), None)
         for p in (again or {}).get("platforms", []):
-            actions.append(f'<form class="inline" method="post" action="/repost"><input type="hidden" name="id" '
+            actions.append(f'<form class="inline" method="post" action="/repost" onsubmit="return confirm({_again_question(p)})">'
+                           f'<input type="hidden" name="id" '
                            f'value="{c["id"]}"><input type="hidden" name="platform" value="{p}"><input type="hidden" '
                            f'name="back" value="/clip/{c["id"]}"><button>Post again on '
                            f'{e(PLATFORM_NAMES.get(p, p))}</button></form>')
@@ -610,6 +613,14 @@ def _scheduled(conn, settings: Settings) -> str:
             f'now to send it sooner.</p>{"".join(rows)}</section>')
 
 
+def _again_question(platform: str) -> str:
+    """The are-you-sure for Post again, as a quoted JavaScript string for an onsubmit attribute."""
+    name = PLATFORM_NAMES.get(platform, platform)
+    text = (f"Post this clip again on {name}? It goes up publicly within 5 minutes." if platform == "youtube" else
+            f"Post this clip again on {name}? It goes back under Ready to post.")
+    return html.escape(json.dumps(text))
+
+
 def _repost(conn, settings: Settings) -> str:
     """Post a recent campaign clip again, for example when a campaign's submit window was missed."""
     clips = pipeline.repostable(conn)
@@ -620,7 +631,8 @@ def _repost(conn, settings: Settings) -> str:
     rows = []
     for c in clips:
         buttons = "".join(
-            f'<form method="post" action="/repost" class="inline"><input type="hidden" name="id" value="{c["id"]}">'
+            f'<form method="post" action="/repost" class="inline" onsubmit="return confirm({_again_question(p)})">'
+            f'<input type="hidden" name="id" value="{c["id"]}">'
             f'<input type="hidden" name="platform" value="{p}"><button>Post again on {e(PLATFORM_NAMES.get(p, p))}</button></form> '
             for p in c["platforms"])
         rows.append(f'<div class="card"><b>{e(c["title"])}</b>'
@@ -1120,12 +1132,15 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Content-Length", str(end - start + 1))
             self.end_headers()
-            with open(path, "rb") as f:
-                f.seek(start)
-                remaining = end - start + 1
-                while remaining > 0 and (chunk := f.read(min(1024 * 1024, remaining))):
-                    self.wfile.write(chunk)
-                    remaining -= len(chunk)
+            try:
+                with open(path, "rb") as f:
+                    f.seek(start)
+                    remaining = end - start + 1
+                    while remaining > 0 and (chunk := f.read(min(1024 * 1024, remaining))):
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True  # the viewer stopped or skipped the video: nothing went wrong
 
         def _page(self, **kwargs) -> None:
             conn = db.connect(settings.db_path)
@@ -1261,7 +1276,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
             finally:
                 conn.close()
             back = self._form().get("back", [""])[0]  # a page's own buttons send you back to it
-            self._redirect(back if back.startswith("/") and not back.startswith("//") else "/")
+            self._redirect(back if SAFE_BACK_RE.match(back) else "/")
 
         def _live_campaign(self, campaign_id: str):
             return campaigns.by_id(campaigns.live(campaigns.load(settings.data_dir))).get(campaign_id)
