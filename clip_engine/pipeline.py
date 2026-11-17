@@ -448,7 +448,8 @@ def ready_to_post(conn: sqlite3.Connection) -> list[dict]:
 def scheduled_posts(conn: sqlite3.Connection) -> list[dict]:
     """Approved clips the engine will post by itself, with the platform and when."""
     rows = conn.execute(
-        "SELECT p.id, p.platform, p.scheduled_at, c.title, c.campaign_id FROM posts p JOIN clips c ON c.id = p.clip_id"
+        "SELECT p.id, p.platform, p.scheduled_at, c.title, c.campaign_id, c.id AS clip_id, c.media_token"
+        " FROM posts p JOIN clips c ON c.id = p.clip_id"
         " WHERE p.status = 'queued' ORDER BY p.scheduled_at, p.id").fetchall()
     return [dict(r) for r in rows]
 
@@ -480,6 +481,15 @@ def expire_stale(conn: sqlite3.Connection, days: int = 7) -> None:
     """Clips nobody posted within a week are dropped, so old files don't fill the disk."""
     conn.execute("UPDATE posts SET status = 'expired' WHERE status IN ('ready', 'review')"
                  " AND scheduled_at < datetime('now', ?)", (f"-{days} days",))
+    conn.commit()
+    cleanup_files(conn)
+
+
+def delete_clip(conn: sqlite3.Connection, clip_id: int) -> None:
+    """Delete a clip that hasn't been posted yet: it is taken off every list it is waiting in and its video is
+    removed. Posts that already went out are left alone."""
+    conn.execute("UPDATE posts SET status = 'rejected' WHERE clip_id = ? AND status IN ('review', 'queued', 'ready')",
+                 (clip_id,))
     conn.commit()
     cleanup_files(conn)
 
@@ -575,8 +585,11 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
         _note(conn, "No new video to clip. Upload one under Add your own video, or wait for the creator's next "
                     "upload." if live else "Add a campaign first.")
         return 0
+    asked = 0
     if job.item:
-        remaining = min(left_today, MAX_CLIPS_PER_UPLOAD)  # a video you handed over is used once, so take today's clips from it, up to 4
+        # a video you handed over is used once: make as many clips as you asked for (up to 4), within today's limit
+        asked = min(int(job.item.get("count") or 0), MAX_CLIPS_PER_UPLOAD)
+        remaining = min(left_today, asked or MAX_CLIPS_PER_UPLOAD)
     src, arms, campaign = job.src, job.arms, job.campaign
     log.info("plan %s using %s", arms, src.identifier)
 
@@ -633,7 +646,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                 track_record=track_record(conn),
                 recent_titles=recent,
                 trends=trends.as_prompt(trends.brief(conn, claude, niche_of(campaign, arms), settings.trend_region)),
-                want=min(MIN_CLIPS_PER_UPLOAD, remaining) if job.item else 0,
+                want=min(asked or MIN_CLIPS_PER_UPLOAD, remaining) if job.item else 0,
             )
         elif campaign and campaign.approved_captions:
             # Nothing to read, but the caption is dictated anyway: cut the picture along its shot changes.
@@ -705,7 +718,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                  description or compose_description(clip, job.footer), json.dumps(clip["tags"]), json.dumps(arms),
                  str(out), token, clip.get("score"), clip.get("hook_text", "")),
             )
-            reviewing = review_mode(conn)
+            reviewing = review_mode(conn) or bool(job.item and job.item.get("review"))
             for platform in platforms:
                 by_hand = is_manual(publishers.get(platform))
                 status = "review" if reviewing else ("ready" if by_hand else "queued")

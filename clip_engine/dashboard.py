@@ -11,6 +11,7 @@ POST /settings/post-to  accounts new clips are made for
 POST /labels/done   clear the list of YouTube Shorts waiting for the paid-promotion tick
 POST /repost   post a recent campaign clip again on one account
 POST /post/schedule   set the time an automatic (YouTube) post goes out
+POST /clip/delete   delete a clip that has not been posted yet (waiting for approval, ready to post or scheduled)
 POST /post/now   send one queued automatic post at the next check instead of its scheduled time
 POST /settings/youtube-disconnect   cancel the saved YouTube login at Google and forget it
 POST /campaigns/save   add or update a campaign from the form
@@ -206,7 +207,7 @@ function sendVideo(form, btn) {
   const next = () => {
     const file = files[i];
     const q = new URLSearchParams({campaign: form.campaign.value, creator: form.creator.value,
-                                   title: form.title.value, length: form.length.value, count: form.count.value, name: file.name,
+                                   title: form.title.value, length: form.length.value, count: form.count.value, review: form.review.checked ? '1' : '', name: file.name,
                                    batch: combine ? batch : '', last: i === files.length - 1 ? '1' : ''});
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/manual-video/upload?' + q.toString());
@@ -335,12 +336,15 @@ def _own_video(conn, settings: Settings) -> str:
         f'<label><input type="radio" name="mode" value="combine" checked> <b>Combine</b> them into new videos, '
         f'in a smart order (photos zoom slowly)</label>'
         f'<label><input type="radio" name="mode" value="each"> Clip <b>each video</b> separately (videos only)</label></div>'
-        f'<label style="margin-top:8px">How many different videos? <small>(when combining; the engine splits your files '
-        f'between them, so give it enough files for each, about 6 to 10 photos or clips per video)</small></label>'
+        f'<label style="margin-top:8px">How many clips do you want? <small>(up to 4. Cutting one video: that many '
+        f'different moments. Combining: that many different videos, so give it enough files for each, about 6 to 10 '
+        f'photos or clips per video)</small></label>'
         f'<select name="count" style="width:100%;font:inherit;padding:9px">'
-        + "".join(f'<option value="{n}">{n}</option>' for n in range(1, manual.MAX_VIDEOS + 1)) +
+        + "".join(f'<option value="{n}"{" selected" if n == 2 else ""}>{n}</option>' for n in range(1, manual.MAX_VIDEOS + 1)) +
         f'</select>'
-        f'<label style="margin-top:8px">How long should each one be?</label>'
+        f'<label style="margin-top:8px"><input type="checkbox" name="review" checked> Let me watch each clip before it '
+        f'can post (approve, reject or download it)</label>'
+        f'<label style="margin-top:8px">How long should each combined video be?</label>'
         f'<select name="length" style="width:100%;font:inherit;padding:9px"><option value="30">15 to 30 seconds (best)</option>'
         f'<option value="60">Up to 60 seconds</option></select>'
         f'<div class="muted status" style="margin:6px 0"></div>'
@@ -348,6 +352,12 @@ def _own_video(conn, settings: Settings) -> str:
         f'<details style="margin-top:10px"><summary>Paste a link instead</summary>'
         f'<form method="post" action="/manual-video/link">{common}'
         f'<label>Video link</label><input type="url" name="url" placeholder="https://">'
+        f'<label style="margin-top:8px">How many clips do you want? <small>(up to 4)</small></label>'
+        f'<select name="count" style="width:100%;font:inherit;padding:9px">'
+        + "".join(f'<option value="{n}"{" selected" if n == 2 else ""}>{n}</option>' for n in range(1, manual.MAX_VIDEOS + 1)) +
+        f'</select>'
+        f'<label style="margin-top:8px"><input type="checkbox" name="review" checked> Let me watch each clip before it '
+        f'can post (approve, reject or download it)</label>'
         f'<button class="primary" style="margin-top:10px">Add video</button></form></details>'
         + UPLOAD_JS + '</section>')
 
@@ -430,6 +440,8 @@ def _review(conn, settings: Settings) -> str:
             + (f'<div>On-screen hook: <b>{e(c["hook_text"])}</b></div>' if c.get("hook_text") else "")
             + f'<video controls playsinline preload="metadata" src="/media/{e(c["media_token"])}.mp4"></video>'
             f'<div class="desc">{e(c["description"])}</div>'
+            f'<div class="row"><a class="button" href="/media/{e(c["media_token"])}.mp4?download=1" '
+            f'download="clip-{c["id"]}.mp4">Download</a></div>'
             f'<form method="post" action="/review/approve" style="margin-top:8px"><input type="hidden" name="id" '
             f'value="{c["id"]}"><input type="hidden" name="choose" value="1"><div class="checks"><b>Post to:</b> {_platform_checks(c["platforms"].split(", "))}</div>'
             + "".join(f'<label>{e(PLATFORM_NAMES.get(p, p))} posts at <small>(Eastern time)</small></label>'
@@ -437,12 +449,13 @@ def _review(conn, settings: Settings) -> str:
             +
             f'<div class="row" style="margin-top:8px"><button class="primary">Approve</button></div></form>'
             f'<div class="row" style="margin-top:8px">'
-            f'<form class="inline" method="post" action="/review/reject"><input type="hidden" name="id" '
-            f'value="{c["id"]}"><button>Reject</button></form></div></div>')
+            f'<form class="inline" method="post" action="/review/reject" onsubmit="return confirm(\'Reject this clip? It will '
+            f'be deleted.\')"><input type="hidden" name="id" value="{c["id"]}"><button>Reject</button></form></div></div>')
     approve_all = ('<form method="post" action="/review/approve-all" style="margin-top:10px"><button>Approve all '
                    f'{len(waiting)}</button></form>' if len(waiting) > 1 else "")
     return (f'<section id="review"><h2>Waiting for your approval ({len(waiting)})</h2>'
-            f'<p class="muted">Nothing posts until you approve it. Approved clips go out at their scheduled time.</p>'
+            f'<p class="muted">Watch each clip, then Approve it, Reject it (deletes it) or Download it. Nothing posts until '
+            f'you approve it. Approved clips go out at their scheduled time.</p>'
             f'{"".join(cards)}{approve_all}</section>')
 
 
@@ -456,6 +469,11 @@ def local_input(scheduled_at: str | None, now: datetime | None = None) -> str:
 def _time_box(name: str, scheduled_at: str | None) -> str:
     return (f'<input type="datetime-local" name="{name}" value="{local_input(scheduled_at)}" required '
             f'style="font:inherit;padding:9px">')
+
+
+def _delete_form(clip_id: int) -> str:
+    return (f'<form class="inline" method="post" action="/clip/delete" onsubmit="return confirm(\'Delete this clip? '
+            f'It will not be posted.\')"><input type="hidden" name="id" value="{clip_id}"><button>Delete</button></form>')
 
 
 def _scheduled(conn, settings: Settings) -> str:
@@ -479,6 +497,10 @@ def _scheduled(conn, settings: Settings) -> str:
             + ('' if when == "now" else
                f'<form method="post" action="/post/now" style="margin-top:6px"><input type="hidden" name="id" '
                f'value="{p["id"]}"><button>Post now</button></form>')
+            + '<div class="row" style="margin-top:6px">'
+            + (f'<a class="button" href="/media/{e(p["media_token"])}.mp4?download=1" download="clip-{p["clip_id"]}.mp4">'
+               f'Download</a>' if p["media_token"] else '')
+            + f'{_delete_form(p["clip_id"])}</div>'
             + '</div>')
     return (f'<section id="scheduled"><h2>Posting automatically ({len(posts)})</h2>'
             f'<p class="muted">Each one goes out by itself at the time shown. Change the time with Set time, or tap Post '
@@ -578,7 +600,7 @@ def _ready(conn, settings: Settings) -> str:
             f'{" &middot; best time to post: " + when if when else ""}</div>'
             f'<video controls playsinline preload="metadata" src="/media/{e(c["media_token"])}.mp4"></video>'
             f'<div class="row"><a class="button" href="/media/{e(c["media_token"])}.mp4?download=1" '
-            f'download="clip-{cid}.mp4">Download video</a></div>'
+            f'download="clip-{cid}.mp4">Download video</a>{_delete_form(cid)}</div>'
             f'<p class="muted" style="font-size:13px">iPhone: if the download doesn\'t go to Photos, open the '
             f'video, tap Share, then Save Video.</p>'
             f'<label>Title <small>for YouTube</small></label>'
@@ -1058,6 +1080,8 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     label = post_time_label(when)
                     return self._redirect("/?" + urlencode({"notice": (
                         "It will post within 5 minutes." if label == "now" else f"It will post at {label}.")}) + "#scheduled")
+                elif self.path == "/clip/delete":
+                    pipeline.delete_clip(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/review/reject":
                     pipeline.reject(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/manual-video/link":
@@ -1128,7 +1152,9 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                 return self._page(error=str(exc))
             manual.add(conn, {"kind": "url", "ref": url, "campaign_id": form["campaign"],
                               "creator": manual.clean_text(form.get("creator", "")),
-                              "title": manual.clean_text(form.get("title", ""))})
+                              "title": manual.clean_text(form.get("title", "")),
+                              "count": manual.clean_count(form.get("count", "")),
+                              "review": form.get("review") == "on"})
             return self._redirect("/?" + urlencode({"notice": start_now(conn, settings, "Video added.")}))
 
         def _upload_video(self) -> None:
@@ -1164,7 +1190,8 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                                 "campaign_id": query["campaign"], "creator": manual.clean_text(query.get("creator", "")),
                                 "title": manual.clean_text(query.get("title", "")),
                                 "length": manual.clean_length(query.get("length", "")),
-                                "count": manual.clean_count(query.get("count", ""))})
+                                "count": manual.clean_count(query.get("count", "")),
+                                "review": query.get("review") == "1"})
                             videos = manual.queue(conn)[-1]["count"]
                             made = "one video" if videos == 1 else f"{videos} different videos"
                             return reply(200, start_now(conn, settings, f"{count} file{'s' if count > 1 else ''} "
@@ -1174,7 +1201,9 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     return reply(200, "File added.")
                 manual.add(conn, {"kind": "file", "ref": str(path), "campaign_id": query["campaign"],
                                   "creator": manual.clean_text(query.get("creator", "")),
-                                  "title": manual.clean_text(query.get("title", "")) or Path(query["name"]).stem[:60]})
+                                  "title": manual.clean_text(query.get("title", "")) or Path(query["name"]).stem[:60],
+                                  "count": manual.clean_count(query.get("count", "")),
+                                  "review": query.get("review") == "1"})
                 message = start_now(conn, settings, "Video uploaded.")
             finally:
                 conn.close()

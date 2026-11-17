@@ -1029,3 +1029,115 @@ def test_dashboard_lets_you_pick_the_youtube_time_when_approving_and_afterwards(
         (target + timedelta(hours=4)).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     bad = _get(base + "/post/schedule", "s3cret", data=f"id={pid}&at=nonsense".encode()).read().decode()
     assert "Pick a date and a time" in bad
+
+
+# --- choose how many clips; watch each before it can post; download or delete ---------------------------------
+
+def test_upload_and_link_forms_carry_the_clip_count_and_the_review_choice(server, tmp_path, monkeypatch):
+    base, conn = server
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    _campaign(tmp_path)
+
+    def upload(query, body=b"video"):
+        req = urllib.request.Request(f"{base}/manual-video/upload?{query}", data=body, method="POST")
+        req.add_header("Origin", base)
+        req.add_header("Authorization", "Basic " + base64.b64encode(b"me:s3cret").decode())
+        return urllib.request.urlopen(req, timeout=5).status
+
+    assert upload("campaign=pod&name=a.mp4&count=3&review=1") == 200
+    assert upload("campaign=pod&name=b.mp4&count=99") == 200  # capped at 4; review not ticked
+    first, second = manual.queue(db.connect(tmp_path / "clip_engine.db"))
+    assert first["count"] == 3 and first["review"] is True
+    assert second["count"] == 4 and second["review"] is False
+    _get(base + "/manual-video/link", "s3cret", data=b"campaign=pod&url=https%3A%2F%2Fdrive.google.com%2Ffile%2Fd%2F1&count=2&review=on")
+    link = manual.queue(db.connect(tmp_path / "clip_engine.db"))[-1]
+    assert link["count"] == 2 and link["review"] is True
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "How many clips do you want?" in page and "Let me watch each clip before it can post" in page
+    assert '<option value="4">' in page and '<option value="5">' not in page
+
+
+def test_an_upload_makes_exactly_the_number_of_clips_asked_for(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    titles = ["Heismay steps into the light", "A quiet look at the city", "The party gathers at night", "A fourth place"]
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, titles)
+    item = manual.pop(conn)
+    manual.add(conn, {**item, "count": 3})
+    produced = pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube")}, 2)
+    asked = claude.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "at least 3 different moments (up to 3)" in asked and produced == 3
+    conn2, claude2 = _produce_fixture(tmp_path / "one", monkeypatch, {}, titles) if (tmp_path / "one").mkdir() is None else (None, None)
+    item = manual.pop(conn2)
+    manual.add(conn2, {**item, "count": 1})
+    assert pipeline.produce(conn2, Settings(data_dir=tmp_path / "one"), claude2, None, {"youtube": FakePub("youtube")}, 2) == 1
+    assert "Pick up to 1 moments" in claude2.beta.messages.create.call_args.kwargs["messages"][0]["content"]
+
+
+def test_an_upload_can_ask_for_review_even_when_the_global_setting_is_off(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    for review, expected in ((True, "review"), (False, "queued")):
+        folder = tmp_path / str(review)
+        folder.mkdir()
+        conn, claude = _produce_fixture(folder, monkeypatch, {"platforms": ["youtube"]} if False else {}, ["Heismay steps into the light"])
+        db.put(conn, "review_mode", "off")
+        db.put(conn, "auto_platforms", "youtube")
+        item = manual.pop(conn)
+        manual.add(conn, {**item, "count": 1, "review": review})
+        pipeline.produce(conn, Settings(data_dir=folder), claude, None, {"youtube": FakePub("youtube")}, 2)
+        assert {r["status"] for r in conn.execute("SELECT status FROM posts WHERE platform = 'youtube'")} == {expected}
+
+
+def test_delete_clip_removes_unposted_clips_but_not_posts_that_went_out(tmp_path):
+    conn = db.connect(tmp_path / "d.db")
+    f = tmp_path / "c.mp4"
+    f.write_bytes(b"v")
+    cid = conn.execute(
+        "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms, file_path,"
+        " media_token) VALUES ('s', 'pod', 0, 30, 'Clip', 'd', '[]', '{}', ?, ?)", (str(f), "k" * 32)).lastrowid
+    for p, st in (("youtube", "queued"), ("tiktok", "ready"), ("instagram", "review")):
+        conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, ?, ?, datetime('now'))", (cid, p, st))
+    conn.commit()
+    pipeline.delete_clip(conn, cid)
+    assert {r[0] for r in conn.execute("SELECT status FROM posts")} == {"rejected"} and not f.exists()
+    keep = tmp_path / "k.mp4"
+    keep.write_bytes(b"v")
+    cid2 = conn.execute(
+        "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms, file_path,"
+        " media_token) VALUES ('s', 'pod', 0, 30, 'Posted', 'd', '[]', '{}', ?, ?)", (str(keep), "j" * 32)).lastrowid
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at, url) VALUES (?, 'tiktok', 'posted', datetime('now'), 'https://x')", (cid2,))
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'youtube', 'queued', datetime('now'))", (cid2,))
+    conn.commit()
+    pipeline.delete_clip(conn, cid2)
+    assert dict(conn.execute("SELECT platform, status FROM posts WHERE clip_id = ?", (cid2,)).fetchall()) == \
+        {"tiktok": "posted", "youtube": "rejected"} and keep.exists()  # what went out stays, and the video can still be reposted
+
+
+def test_clip_cards_have_download_and_delete_buttons(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    db.put(conn, "auto_platforms", "youtube")
+    f = tmp_path / "clips" / ("m" * 32 + ".mp4")
+    f.parent.mkdir(exist_ok=True)
+    f.write_bytes(b"v")
+    cid = conn.execute(
+        "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms, file_path,"
+        " media_token) VALUES ('s', 'pod', 0, 30, 'Heismay clip', 'd', '[]', '{}', ?, ?)", (str(f), "m" * 32)).lastrowid
+    for p in ("youtube", "tiktok"):
+        conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, ?, 'review', datetime('now'))", (cid, p))
+    conn.commit()
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Watch each clip" in page and f'download="clip-{cid}.mp4">Download</a>' in page and "Reject" in page
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    soon = (datetime.now(ZoneInfo("America/New_York")) + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M")
+    _get(base + "/review/approve", "s3cret", data=f"id={cid}&choose=1&platforms=youtube&platforms=tiktok&at={soon}".encode())
+    page = _get(base + "/", "s3cret").read().decode()
+    assert page.count("/clip/delete") == 2  # one under Ready to post, one under Posting automatically
+    assert page.count(f'download="clip-{cid}.mp4"') >= 2
+    _get(base + "/clip/delete", "s3cret", data=f"id={cid}".encode())
+    assert {r[0] for r in conn.execute("SELECT status FROM posts")} == {"rejected"} and not f.exists()
+    assert "/clip/delete" not in _get(base + "/", "s3cret").read().decode()
