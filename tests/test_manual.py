@@ -1141,3 +1141,27 @@ def test_clip_cards_have_download_and_delete_buttons(server, tmp_path):
     _get(base + "/clip/delete", "s3cret", data=f"id={cid}".encode())
     assert {r[0] for r in conn.execute("SELECT status FROM posts")} == {"rejected"} and not f.exists()
     assert "/clip/delete" not in _get(base + "/", "s3cret").read().decode()
+
+
+def test_every_clip_list_has_a_delete(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    f = tmp_path / "clips" / ("r" * 32 + ".mp4")
+    f.parent.mkdir(exist_ok=True)
+    f.write_bytes(b"v")
+    cid = conn.execute(
+        "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms, file_path,"
+        " media_token) VALUES ('s', 'pod', 0, 30, 'Waiting clip', 'd', '[]', '{}', ?, ?)", (str(f), "r" * 32)).lastrowid
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'tiktok', 'review', datetime('now'))", (cid,))
+    conn.commit()
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Reject" in page and page.count("/clip/delete") == 1  # the approval card has both Reject and Delete
+    posted_id, posted_file = _posted_clip(conn, tmp_path)  # a posted clip kept for reposting
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Delete video" in page and "/clip/delete-video" in page
+    _get(base + "/clip/delete-video", "s3cret", data=f"id={posted_id}".encode())
+    assert not posted_file.exists() and conn.execute("SELECT file_path FROM clips WHERE id = ?", (posted_id,)).fetchone()[0] is None
+    assert conn.execute("SELECT status FROM posts WHERE clip_id = ?", (posted_id,)).fetchone()[0] == "posted"  # the record stays
+    assert "Delete video" not in _get(base + "/", "s3cret").read().decode()
+    _get(base + "/clip/delete", "s3cret", data=f"id={cid}".encode())
+    assert not f.exists()

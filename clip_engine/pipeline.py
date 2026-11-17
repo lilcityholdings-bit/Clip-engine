@@ -494,6 +494,17 @@ def delete_clip(conn: sqlite3.Connection, clip_id: int) -> None:
     cleanup_files(conn)
 
 
+def delete_clip_video(conn: sqlite3.Connection, clip_id: int) -> None:
+    """Delete the saved video of a clip (kept after posting so it could be posted again). The posts that went
+    out stay on record; the clip just can't be posted again, and anything still waiting for it is removed."""
+    delete_clip(conn, clip_id)
+    row = conn.execute("SELECT file_path FROM clips WHERE id = ?", (clip_id,)).fetchone()
+    if row and row["file_path"]:
+        Path(row["file_path"]).unlink(missing_ok=True)
+        conn.execute("UPDATE clips SET file_path = NULL WHERE id = ?", (clip_id,))
+        conn.commit()
+
+
 def reject(conn: sqlite3.Connection, clip_id: int) -> None:
     conn.execute("UPDATE posts SET status = 'rejected' WHERE clip_id = ? AND status = 'review'", (clip_id,))
     conn.commit()
@@ -813,8 +824,8 @@ def cleanup_files(conn: sqlite3.Connection) -> None:
 
 
 def repostable(conn: sqlite3.Connection) -> list[dict]:
-    """Recent campaign clips whose video is still here and that may still be posted again, with the
-    accounts each can go to (those it was made for, without an open post already)."""
+    """Recent campaign clips that were posted, whose video is still here and that may still be posted again, with
+    the accounts each can go to (those it was made for, without an open post already)."""
     clips = conn.execute(
         "SELECT id, title, campaign_id, file_path FROM clips WHERE campaign_id IS NOT NULL AND file_path IS NOT NULL"
         " AND created_at >= datetime('now', ?) ORDER BY id DESC", (f"-{REPOST_DAYS} days",)).fetchall()
@@ -823,6 +834,8 @@ def repostable(conn: sqlite3.Connection) -> list[dict]:
         if not Path(c["file_path"]).exists():
             continue
         posts = conn.execute("SELECT platform, status FROM posts WHERE clip_id = ?", (c["id"],)).fetchall()
+        if not any(p["status"] == "posted" for p in posts):
+            continue  # nothing has gone out yet: it is still waiting for approval or to be posted
         used = sum(p["status"] in ("posted", "ready", "queued") for p in posts)
         busy = {p["platform"] for p in posts if p["status"] in ("ready", "queued")}
         platforms = [p for p in ALL_PLATFORMS if p in {x["platform"] for x in posts} and p not in busy]

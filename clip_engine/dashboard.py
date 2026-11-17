@@ -11,6 +11,7 @@ POST /settings/post-to  accounts new clips are made for
 POST /labels/done   clear the list of YouTube Shorts waiting for the paid-promotion tick
 POST /repost   post a recent campaign clip again on one account
 POST /post/schedule   set the time an automatic (YouTube) post goes out
+POST /clip/delete-video   delete a posted clip's saved video so it can't be posted again
 POST /clip/delete   delete a clip that has not been posted yet (waiting for approval, ready to post or scheduled)
 POST /post/now   send one queued automatic post at the next check instead of its scheduled time
 POST /settings/youtube-disconnect   cancel the saved YouTube login at Google and forget it
@@ -450,11 +451,12 @@ def _review(conn, settings: Settings) -> str:
             f'<div class="row" style="margin-top:8px"><button class="primary">Approve</button></div></form>'
             f'<div class="row" style="margin-top:8px">'
             f'<form class="inline" method="post" action="/review/reject" onsubmit="return confirm(\'Reject this clip? It will '
-            f'be deleted.\')"><input type="hidden" name="id" value="{c["id"]}"><button>Reject</button></form></div></div>')
+            f'be deleted.\')"><input type="hidden" name="id" value="{c["id"]}"><button>Reject</button></form>'
+            f'{_delete_form(c["id"])}</div></div>')
     approve_all = ('<form method="post" action="/review/approve-all" style="margin-top:10px"><button>Approve all '
                    f'{len(waiting)}</button></form>' if len(waiting) > 1 else "")
     return (f'<section id="review"><h2>Waiting for your approval ({len(waiting)})</h2>'
-            f'<p class="muted">Watch each clip, then Approve it, Reject it (deletes it) or Download it. Nothing posts until '
+            f'<p class="muted">Watch each clip, then Approve it, Reject it, Delete it or Download it (Reject and Delete both remove it). Nothing posts until '
             f'you approve it. Approved clips go out at their scheduled time.</p>'
             f'{"".join(cards)}{approve_all}</section>')
 
@@ -523,7 +525,10 @@ def _repost(conn, settings: Settings) -> str:
         rows.append(f'<div class="card"><b>{e(c["title"])}</b>'
                     f'<div class="muted">{e(names.get(c["campaign_id"], c["campaign_id"]))} &middot; '
                     f'{c["left"]} more post{"s" if c["left"] != 1 else ""} allowed</div>'
-                    f'<div class="row" style="margin-top:6px">{buttons}</div></div>')
+                    f'<div class="row" style="margin-top:6px">{buttons}'
+                    f'<form class="inline" method="post" action="/clip/delete-video" onsubmit="return confirm(\'Delete this '
+                    f'video for good? You will not be able to post it again.\')"><input type="hidden" name="id" '
+                    f'value="{c["id"]}"><button>Delete video</button></form></div></div>')
     return ('<section id="repost"><h2>Post a clip again</h2>'
             '<p class="muted">For when you missed a campaign\'s submit window (some only take a post submitted within '
             '30 minutes), or lost the post. Tap one and it appears under Ready to post. Leave the earlier post up: '
@@ -1080,6 +1085,8 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     label = post_time_label(when)
                     return self._redirect("/?" + urlencode({"notice": (
                         "It will post within 5 minutes." if label == "now" else f"It will post at {label}.")}) + "#scheduled")
+                elif self.path == "/clip/delete-video":
+                    pipeline.delete_clip_video(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/clip/delete":
                     pipeline.delete_clip(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/review/reject":
