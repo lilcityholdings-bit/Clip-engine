@@ -124,6 +124,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 </style></head><body><main>
 <h1>Clip Engine <span class="{state_class}">&middot; {state}</span></h1>
 {banner}
+{next}
 {todo}
 {start}
 <section><div class="row">
@@ -223,6 +224,11 @@ def _campaign_rows(settings: Settings) -> str:
 
 
 UPLOAD_JS = """<script>
+// Remember the campaign picked last time (only on this phone).
+document.querySelectorAll('#own-video select[name=campaign]').forEach(function (sel) {
+  try { var last = localStorage.getItem('campaign'); if (last && sel.querySelector('option[value="' + last + '"]')) sel.value = last; } catch (err) {}
+  sel.addEventListener('change', function () { try { localStorage.setItem('campaign', sel.value); } catch (err) {} });
+});
 function sendVideo(form, btn) {
   const files = Array.from(form.file.files);
   if (!files.length) { alert('Choose at least one file first.'); return false; }
@@ -267,6 +273,136 @@ setInterval(function () {
   if (!busy && !playing && !window.uploading) location.replace(location.pathname);
 }, 20000);
 </script>"""
+
+
+# The "Do this next" card: one thing at a time, with big buttons. On a phone, Share hands the video straight to
+# TikTok or Instagram (no downloading), with the caption already copied.
+NEXT_JS = """<script>
+var clipFile = null;
+function prepareClip(url) {
+  fetch(url).then(function (r) { return r.blob(); }).then(function (b) {
+    clipFile = new File([b], 'clip.mp4', {type: 'video/mp4'});
+    var btn = document.getElementById('share-btn');
+    if (btn) { btn.disabled = false; btn.textContent = btn.getAttribute('data-label'); }
+  }).catch(function () {
+    var btn = document.getElementById('share-btn');
+    if (btn) { btn.disabled = false; btn.textContent = btn.getAttribute('data-label'); }
+  });
+}
+function shareClip(captionId, downloadUrl) {
+  var text = document.getElementById(captionId).value;
+  if (navigator.clipboard) { navigator.clipboard.writeText(text).catch(function () {}); }
+  if (clipFile && navigator.canShare && navigator.canShare({files: [clipFile]})) {
+    navigator.share({files: [clipFile]}).catch(function () {});
+  } else {
+    location.href = downloadUrl;  // this phone can't share files: download it instead
+  }
+  return false;
+}
+function pasteLink(formId) {
+  var f = document.getElementById(formId);
+  if (!(navigator.clipboard && navigator.clipboard.readText)) { f.url.focus(); return false; }
+  navigator.clipboard.readText().then(function (t) {
+    var m = (t || '').match(/https?:\\/\\/\\S+/);
+    if (m) { f.url.value = m[0]; f.submit(); }
+    else { alert('First copy the post link: in the app tap Share, then Copy link. Then tap this button again.'); }
+  }).catch(function () { f.url.focus(); });
+  return false;
+}
+function copyAndOpen(link, page) {
+  if (navigator.clipboard) { navigator.clipboard.writeText(link).catch(function () {}); }
+  window.open(page, '_blank');
+  return false;
+}
+</script>"""
+
+BIG = 'style="font-size:18px;padding:14px 18px;width:100%;margin-top:8px"'
+
+
+def _short_rules(campaign) -> str:
+    """The two or three rules that matter while posting, in a few words."""
+    if campaign is None:
+        return ""
+    rules = []
+    if not campaign.allow_music:
+        rules.append("Don't add music")
+    rules.append("Don't turn on Paid partnership" if not campaign.paid_label else "Turn on Paid partnership")
+    rules.append("Keep it public")
+    return " &middot; ".join(rules) + "."
+
+
+def _next_task(conn, settings: Settings) -> str:
+    """The single next thing to do, with big buttons."""
+    e = html.escape
+    camps = campaigns.by_id(campaigns.load(settings.data_dir))
+
+    def card(title: str, body: str) -> str:
+        return (f'<section id="next" style="border:2px solid var(--accent)"><h2 style="font-size:17px;color:var(--text)">'
+                f'{title}</h2>{body}</section>')
+
+    # 1. A link that must be submitted soon
+    for p in pipeline.pending_submissions(conn):
+        camp = camps.get(p["campaign_id"])
+        label, open_ = deadline_label(p, camp)
+        if label and open_ and camp:
+            name = PLATFORM_NAMES.get(p["platform"], p["platform"])
+            return card(f"Submit your {e(name)} link now", (
+                f'<p class="good"><b>{e(label)}</b></p>'
+                f'<button class="primary" {BIG} onclick="return copyAndOpen({e(json.dumps(p["url"]))}, '
+                f'{e(json.dumps(camp.program_url))})">1. Copy the link and open the campaign</button>'
+                f'<p class="muted">On the campaign page tap <b>Submit clip</b>, paste the link, tick the box, submit.</p>'
+                f'<form method="post" action="/submitted/one"><input type="hidden" name="id" value="{p["id"]}">'
+                f'<input type="hidden" name="back" value="/"><button {BIG}>2. I submitted it &#10003;</button></form>'
+                + NEXT_JS))
+
+    # 2. A clip to check
+    waiting = pipeline.awaiting_review(conn)
+    if waiting:
+        c = waiting[0]
+        more = f' <span class="muted">({len(waiting) - 1} more after this)</span>' if len(waiting) > 1 else ""
+        return card(f"Do you want to post this clip?{more}", (
+            f'<video controls playsinline preload="metadata" style="width:100%;max-height:60vh;background:#000" '
+            f'src="/media/{e(c["media_token"])}.mp4"></video>'
+            f'<p><b>{e(c["title"])}</b></p>'
+            f'<form method="post" action="/review/approve"><input type="hidden" name="id" value="{c["id"]}">'
+            f'<input type="hidden" name="back" value="/"><button class="primary" {BIG}>&#128077; Yes, post it</button></form>'
+            f'<form method="post" action="/review/reject"><input type="hidden" name="id" value="{c["id"]}">'
+            f'<input type="hidden" name="back" value="/"><button {BIG}>&#128078; No, delete it</button></form>'))
+
+    # 3. A clip to post from the phone
+    ready = pipeline.ready_to_post(conn)
+    if ready:
+        c = ready[0]
+        p = c["posts"][0]
+        name = PLATFORM_NAMES.get(p["platform"], p["platform"])
+        camp = camps.get(c["campaign_id"])
+        video = f'/media/{e(c["media_token"])}.mp4'
+        rules = _short_rules(camp)
+        return card(f"Post this clip on {e(name)}", (
+            f'<video controls playsinline preload="metadata" style="width:100%;max-height:45vh;background:#000" src="{video}"></video>'
+            f'<textarea id="next-caption" readonly style="display:none">{e(c["description"])}</textarea>'
+            f'<button id="share-btn" class="primary" {BIG} disabled data-label="1. Share to {e(name)}" '
+            f'onclick="return shareClip(\'next-caption\', \'{video}?download=1\')">Getting the video ready&hellip;</button>'
+            f'<p class="muted">Pick <b>{e(name)}</b> in the list that opens. The caption is already copied: in {e(name)} tap '
+            f'<b>Next</b>, hold the caption box and tap <b>Paste</b>, then tap <b>Post</b>. {rules}</p>'
+            f'<form id="link-form" method="post" action="/manual/save"><input type="hidden" name="id" value="{p["id"]}">'
+            f'<input type="hidden" name="back" value="/">'
+            f'<button type="button" {BIG} onclick="return pasteLink(\'link-form\')">2. Paste my {e(name)} link</button>'
+            f'<p class="muted">After posting, in {e(name)} tap <b>Share</b>, then <b>Copy link</b>, come back and tap the button '
+            f'above. Or paste it here:</p><div class="row"><input type="url" name="url" placeholder="https://" '
+            f'style="flex:1 1 200px"><button>Save</button></div></form>'
+            f'<form method="post" action="/manual/skip" style="margin-top:8px"><input type="hidden" name="id" value="{p["id"]}">'
+            f'<input type="hidden" name="back" value="/"><button>Skip: not posting this on {e(name)}</button></form>'
+            + NEXT_JS + f'<script>prepareClip("{video}");</script>'))
+
+    # 4. Clips being made, or nothing to do
+    if (pipeline.status(conn) or {}).get("state") == "running":
+        return card("Making your clips&hellip;", '<p>This takes 5 to 20 minutes. You can close this page and come back.</p>')
+    scheduled = len(pipeline.scheduled_posts(conn))
+    later = (f'<p class="muted">YouTube will post {scheduled} clip{"s" if scheduled > 1 else ""} by itself.</p>'
+             if scheduled else "")
+    return card("All done &#10003;", f'<p>Nothing to do right now.</p>{later}'
+                f'<a class="button primary" {BIG} href="#own-video">Add a video</a>')
 
 
 def _todo(conn, settings: Settings) -> str:
@@ -1052,6 +1188,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
                                      open_form=bool(form_values) or not campaigns.load(settings.data_dir)),
         status=_status(conn),
         todo=_todo(conn, settings),
+        next=_next_task(conn, settings),
         state="paused" if paused else "running", state_class="bad" if paused else "good",
         earned=f"{sum(r['estimated_usd'] for r in earn):,.2f}", views=f"{totals['views']:,}",
         posted=totals["posted"] or 0, queued=totals["queued"] or 0,
@@ -1410,7 +1547,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                         label, _ = deadline_label(saved, camp) if saved else ("", True)
                         if label:
                             return self._redirect("/?" + urlencode({"notice": (
-                                f"Link saved. Now submit it on the campaign page: {label}.")}) + "#links")
+                                f"Link saved. Now submit it on the campaign page: {label}.")}) + "#next")
                 elif self.path == "/labels/done":
                     youtube.clear_label_todo(conn)
                 elif self.path == "/repost":

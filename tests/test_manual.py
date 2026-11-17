@@ -1571,3 +1571,59 @@ def test_the_main_page_is_short_upload_then_clips_then_links(server, tmp_path):
     assert "Upload</button>" in form.split("</details>")[1]  # the Upload button is outside More options
     assert "Creator" not in visible and "Combine" not in visible  # tucked under More options
     assert "More options" in form
+
+
+# --- "Do this next": one thing at a time, big buttons -------------------------------------------------------------
+
+def test_do_this_next_shows_one_thing_at_a_time_in_order_of_urgency(tmp_path):
+    from clip_engine.config import Settings
+    settings = Settings(data_dir=tmp_path)
+    conn = db.connect(settings.db_path)
+    _strict(tmp_path)
+    assert "All done" in dashboard._next_task(conn, settings) and "Add a video" in dashboard._next_task(conn, settings)
+    pipeline.set_status(conn, "running", "Making clips now.")
+    assert "Making your clips" in dashboard._next_task(conn, settings)
+    pipeline.set_status(conn, "done", "Made 2 clips.")
+
+    def clip(title, status, platform="tiktok", **post):
+        cid = conn.execute("INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags,"
+                           " arms, media_token) VALUES ('s', 'sega', 0, 20, ?, 'Caption text\n#Ad', '[]', '{}', ?)",
+                           (title, title[:1] * 32)).lastrowid
+        pid = conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at, url, posted_at) VALUES"
+                           " (?, ?, ?, datetime('now'), ?, ?)", (cid, platform, status, post.get("url"), post.get("posted_at"))).lastrowid
+        conn.commit()
+        return cid, pid
+    ready_clip, ready_post = clip("ready one", "ready")
+    card = dashboard._next_task(conn, settings)
+    assert "Post this clip on TikTok" in card and "1. Share to TikTok" in card and "2. Paste my TikTok link" in card
+    assert "navigator.share" in card and f'value="{ready_post}"' in card and "Don't add music" in card
+    waiting_clip, _ = clip("waiting one", "review")
+    card = dashboard._next_task(conn, settings)
+    assert "Do you want to post this clip?" in card and "Yes, post it" in card and "No, delete it" in card  # checking comes first
+    _, sub = clip("posted one", "posted", url="https://tiktok.com/t/x",
+                  posted_at=__import__("datetime").datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+    card = dashboard._next_task(conn, settings)
+    assert "Submit your TikTok link now" in card and "min left" in card and "I submitted it" in card  # a deadline beats all
+    assert "copyAndOpen" in card and "contentrewards.com" in card
+
+
+def test_do_this_next_buttons_work_end_to_end(server, tmp_path):
+    base, conn = server
+    _strict(tmp_path)
+    f = tmp_path / "clips" / ("n" * 32 + ".mp4")
+    f.parent.mkdir(exist_ok=True)
+    f.write_bytes(b"v")
+    cid = conn.execute("INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms,"
+                       " file_path, media_token) VALUES ('s', 'sega', 0, 20, 'New clip', 'Caption\n#Ad', '[]', '{}', ?, ?)",
+                       (str(f), "n" * 32)).lastrowid
+    pid = conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'tiktok', 'review', datetime('now'))",
+                       (cid,)).lastrowid
+    conn.commit()
+    page = _get(base + "/", "s3cret").read().decode()
+    assert page.index('id="next"') < page.index('id="own-video"') and "Yes, post it" in page
+    page = _get(base + "/review/approve", "s3cret", data=f"id={cid}&back=/".encode()).read().decode()
+    assert "Post this clip on TikTok" in page  # approving moves straight on to posting it
+    page = _get(base + "/manual/save", "s3cret", data=f"id={pid}&back=/&url=https%3A%2F%2Ftiktok.com%2Ft%2Fnew".encode()).read().decode()
+    assert "Submit your TikTok link now" in page  # saving the link moves straight on to submitting it
+    page = _get(base + "/submitted/one", "s3cret", data=f"id={pid}&back=/".encode()).read().decode()
+    assert "All done" in page
