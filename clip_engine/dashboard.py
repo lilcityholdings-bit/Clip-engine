@@ -4,6 +4,7 @@ GET  /                 dashboard (HTTP basic auth, any username + DASHBOARD_PASS
 POST /pause, /resume   stop or restart posting and production
 POST /run              start a production cycle on the next tick
 POST /submitted        mark all pending campaign links as submitted
+POST /submitted/one    mark one link as submitted
 POST /review/approve, /review/reject, /review/approve-all   decide on clips waiting for review
 POST /manual/save, /manual/skip   record (or skip) a clip you posted yourself from your phone
 POST /settings/review, /settings/ramp, /settings/youtube-auto, /settings/youtube-test   switch review mode / gradual start on or off
@@ -124,29 +125,38 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 {banner}
 {todo}
 {start}
+<section><div class="row">
+<form method="post" action="/{toggle}"><button class="primary">{toggle_label}</button></form>
+<form method="post" action="/run"><button>Make clips now</button></form>
+</div>{status}</section>
 {library}
 {review}
 {ready}
 {scheduled}
+<section id="links"><h2>Links to submit</h2>{pending}</section>
+{own_video}
 {repost}
+<section id="campaigns"><h2>Campaigns</h2>{campaigns}{campaign_form}</section>
+<details id="more" style="margin-top:12px"><summary>More: earnings, stats, trends and settings</summary>
 <section><div class="row">
 <div class="stat"><b>${earned}</b><span>estimated earnings</span></div>
 <div class="stat"><b>{views}</b><span>total views</span></div>
 <div class="stat"><b>{posted}</b><span>posts live</span></div>
 <div class="stat"><b>{queued}</b><span>posts queued</span></div>
-</div><div class="row" style="margin-top:12px">
-<form method="post" action="/{toggle}"><button class="primary">{toggle_label}</button></form>
-<form method="post" action="/run"><button>Make clips now</button></form>
-</div>{status}</section>
-<section id="links"><h2>Links to submit</h2>{pending}</section>
-<section id="campaigns"><h2>Campaigns</h2>{campaigns}{campaign_form}</section>
-{own_video}
-<section><h2>Trending now</h2>{trending}</section>
+</div></section>
 <section><h2>Earnings by campaign</h2>{earnings}</section>
+<section><h2>Trending now</h2>{trending}</section>
 <section><h2>What's working (higher score = more views and earnings)</h2>{strategy}</section>
 <section><h2>Recent clips</h2>{clips}</section>
 <section><h2>Recent problems</h2>{errors}</section>
 <section id="settings"><h2>Settings</h2>{settings_html}</section>
+</details>
+<script>
+// A link to a section inside the closed More box opens the box first, so the page can jump there.
+function openFor(hash) {{ var t = hash && document.querySelector(hash); var d = t && t.closest('details'); if (d) d.open = true; }}
+document.querySelectorAll('a[href^="#"]').forEach(function (a) {{ a.addEventListener('click', function () {{ openFor(a.getAttribute('href')); }}); }});
+openFor(location.hash);
+</script>
 </main></body></html>"""
 
 CLIP_PAGE = ("""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -272,7 +282,11 @@ def _todo(conn, settings: Settings) -> str:
     if labels:
         items.append(f'<a class="button" href="#labels"><b>{labels}</b> YouTube label{"s" if labels > 1 else ""} to tick</a>')
     if links:
-        items.append(f'<a class="button" href="#links"><b>{links}</b> link{"s" if links > 1 else ""} to submit</a>')
+        camps = campaigns.by_id(campaigns.load(settings.data_dir))
+        soonest = next((label for label, ok in (deadline_label(p, camps.get(p["campaign_id"]))
+                                                for p in pipeline.pending_submissions(conn)) if label and ok), "")
+        hurry = f' &middot; {html.escape(soonest.split(",")[0])}' if soonest else ""
+        items.append(f'<a class="button" href="#links"><b>{links}</b> link{"s" if links > 1 else ""} to submit{hurry}</a>')
     has_campaign = bool(campaigns.load(settings.data_dir))
     if not items and not has_campaign:
         return ""  # still setting up: the Getting started list leads
@@ -424,6 +438,10 @@ def _campaign_form(values: dict | None, editing: bool, open_form: bool) -> str:
 <input type="text" name="trim_start" inputmode="decimal" placeholder="0" value="{val("trim_start") if v.get("trim_start") else ""}">
 <label>Skip at the end <small>seconds cut from the end of every video: logos, end cards. 0 for none</small></label>
 <input type="text" name="trim_end" inputmode="decimal" placeholder="0" value="{val("trim_end") if v.get("trim_end") else ""}">
+<label>Submit within <small>minutes after posting the campaign accepts a link (e.g. 30); 0 for no limit. The dashboard then shows a deadline for each link</small></label>
+<input type="text" name="submit_within_minutes" inputmode="numeric" placeholder="0" value="{val("submit_within_minutes") if v.get("submit_within_minutes") else ""}">
+<label>Keep posts up for <small>days the campaign requires a post to stay live (e.g. 30); 0 if not stated</small></label>
+<input type="text" name="keep_live_days" inputmode="numeric" placeholder="0" value="{val("keep_live_days") if v.get("keep_live_days") else ""}">
 <label><input type="checkbox" name="paid_label"{paid_checked}> Use the apps' own paid-promotion switch <small>(untick if the campaign bans "paid promotion or ads of any kind"; the caption's #Ad is then the disclosure)</small></label>
 <label><input type="checkbox" name="active"{active_checked}> Live</label></div>
 <label>End date <small>optional</small></label><input type="date" name="ends_on" value="{val("ends_on")}">
@@ -437,6 +455,74 @@ def _platform_checks(platforms: list[str], checked: list[str] | None = None) -> 
     checked = platforms if checked is None else checked
     return "".join(f'<label><input type="checkbox" name="platforms" value="{p}"{" checked" if p in checked else ""}> '
                    f'{html.escape(PLATFORM_NAMES.get(p, p))}</label>' for p in platforms)
+
+
+def deadline_label(post: dict, campaign, now: datetime | None = None) -> tuple[str, bool]:
+    """("Submit by 2:45pm ET, 12 min left", still open) for a campaign with a submit window, else ("", True)."""
+    limit = getattr(campaign, "submit_within_minutes", 0)
+    got = pipeline.submit_deadline(post.get("posted_at"), limit, now)
+    if not got:
+        return "", True
+    deadline, left = got
+    at = deadline.astimezone(ZoneInfo(pipeline.LOCAL_ZONE)).strftime("%-I:%M%p").replace("AM", "am").replace("PM", "pm")
+    if left > 0:
+        return f"Submit by {at} ET, {left} min left", True
+    return (f"The {limit}-minute submit window closed at {at} ET. Use Post again under Post a clip again for a fresh "
+            "post, then submit that one straight away."), False
+
+
+def _submissions(pending: list[dict], settings: Settings) -> str:
+    """The posted links still to be submitted to their campaign, each with its deadline and buttons."""
+    e = html.escape
+    camps = campaigns.by_id(campaigns.load(settings.data_dir))
+    cards = []
+    for p in pending:
+        camp = camps.get(p["campaign_id"])
+        label, open_ = deadline_label(p, camp)
+        when = f'<div class="{"good" if open_ else "bad"}"><b>{e(label)}</b></div>' if label else ""
+        page = (f'<a class="button" href="{e(camp.program_url)}" target="_blank" rel="noopener">Open campaign page</a>'
+                if camp and camp.program_url else "")
+        cards.append(
+            f'<div class="card"><b>{e(p["title"])}</b>'
+            f'<div class="muted">{e(camp.name if camp else p["campaign_id"])} &middot; '
+            f'{e(PLATFORM_NAMES.get(p["platform"], p["platform"]))}</div>{when}'
+            f'<div class="row" style="margin-top:6px"><input type="text" id="link-{p["id"]}" readonly value="{e(p["url"])}" '
+            f'style="flex:1 1 200px"><button type="button" onclick="copyText(\'link-{p["id"]}\', this)">Copy link</button></div>'
+            f'<div class="row" style="margin-top:6px">{page}'
+            f'<form class="inline" method="post" action="/submitted/one"><input type="hidden" name="id" value="{p["id"]}">'
+            f'<input type="hidden" name="back" value="/#links"><button>Mark submitted</button></form></div></div>')
+    return "".join(cards) + COPY_JS
+
+
+def campaign_checklist(campaign) -> list[str]:
+    """The campaign's posting rules as a short checklist for posting by hand."""
+    if campaign is None:
+        return []
+    items = []
+    if campaign.disclosure_line:
+        items.append(f"{campaign.disclosure_line} sits alone on the line right after the caption text (the copied "
+                     "caption already has it).")
+    else:
+        items.append("Keep the #ad disclosure in the caption (the copied caption already has it).")
+    if not campaign.allow_music:
+        items.append("Don't add any sound or music.")
+    items.append("Don't switch on Paid partnership, Branded content or any ad option, and don't boost the post."
+                 if not campaign.paid_label else "Switch on the app's paid-partnership label.")
+    items.append("Everyone can view the post, and likes are visible.")
+    if campaign.submit_within_minutes:
+        items.append(f"Submit the link on the campaign page within {campaign.submit_within_minutes} minutes of posting.")
+    if campaign.keep_live_days:
+        items.append(f"Don't delete the post for {campaign.keep_live_days} days.")
+    return items
+
+
+def _checklist_html(campaign) -> str:
+    items = campaign_checklist(campaign)
+    if not items:
+        return ""
+    return ('<div class="checks" style="flex-direction:column;align-items:flex-start;margin:8px 0">'
+            '<b>Before you post</b>'
+            + "".join(f'<label><input type="checkbox"> {html.escape(i)}</label>' for i in items) + '</div>')
 
 
 def _clip_meta(c: dict) -> str:
@@ -474,7 +560,8 @@ def _clip_page(conn, settings: Settings, clip_id: int) -> str | None:
     if c is None:
         return None
     e = html.escape
-    name = next((x.name for x in campaigns.load(settings.data_dir) if x.id == c["campaign_id"]), c["campaign_id"] or "")
+    camp = next((x for x in campaigns.load(settings.data_dir) if x.id == c["campaign_id"]), None)
+    name = camp.name if camp else (c["campaign_id"] or "")
     auto = pipeline.auto_platforms(conn)
     token = e(c["media_token"] or "")
     video = (f'<video controls playsinline preload="metadata" style="width:100%;max-height:70vh;background:#000" '
@@ -524,6 +611,7 @@ def _clip_page(conn, settings: Settings, clip_id: int) -> str | None:
         f'<section>{video}</section>'
         f'<section><h2>Caption</h2><div style="white-space:pre-wrap">{e(c["description"])}</div></section>'
         f'<section><h2>Where it goes</h2><ul>{"".join(where)}</ul></section>'
+        + (f'<section>{_checklist_html(camp)}</section>' if camp and c["state"] in ("waiting", "approved") else "") +
         f'<section><h2>What do you want to do?</h2><div class="row">{"".join(actions)}</div></section>')))
 
 
@@ -724,6 +812,7 @@ def _ready(conn, settings: Settings) -> str:
             f'<label>Title <small>for YouTube</small></label>'
             f'<div class="row"><input type="text" id="title-{cid}" readonly value="{e(c["title"])}" style="flex:1 1 200px">'
             f'<button type="button" onclick="copyText(\'title-{cid}\', this)">Copy</button></div>'
+            + _checklist_html(camps.get(c["campaign_id"])) +
             f'<label>Caption <small>includes the hashtags, required tags and #ad</small></label>'
             f'<textarea id="caption-{cid}" readonly>{e(caption)}</textarea>'
             f'<div class="row"><button type="button" onclick="copyText(\'caption-{cid}\', this)">Copy caption</button></div>'
@@ -850,11 +939,8 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
         "SELECT COALESCE(SUM(views), 0) AS views, SUM(status = 'posted') AS posted, SUM(status = 'queued') AS queued"
         " FROM posts").fetchone()
     pending = pipeline.pending_submissions(conn)
-    pending_html = _table(["Campaign", "Platform", "Link"],
-                          [[e(p["campaign_id"]), e(p["platform"]), _link(p["url"], p["url"])] for p in pending],
-                          "Nothing waiting.")
-    pending_html = _label_todo(conn) + pending_html
-    if pending:
+    pending_html = _label_todo(conn) + (_submissions(pending, settings) if pending else '<p class="muted">Nothing waiting.</p>')
+    if len(pending) > 1:
         pending_html += '<form method="post" action="/submitted" style="margin-top:10px"><button>Mark all submitted</button></form>'
     clips = conn.execute(
         "SELECT c.id, c.title, c.created_at, c.ai_score, c.campaign_id,"
@@ -1193,6 +1279,8 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     return self._redirect("/?" + urlencode({"notice": (
                         "Resumed. " if was_paused else "") + "Making clips now. They appear at the top of this "
                         "page in 5 to 20 minutes; you can leave and come back."}))
+                elif self.path == "/submitted/one":
+                    pipeline.mark_submitted(conn, [int(self._form().get("id", ["0"])[0] or 0)])
                 elif self.path == "/submitted":
                     pipeline.mark_submitted(conn, [p["id"] for p in pipeline.pending_submissions(conn)])
                 elif self.path == "/review/approve":
@@ -1242,6 +1330,12 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                             pipeline.save_manual_post(conn, post_id, form.get("url", [""])[0])
                         except ValueError as exc:
                             return self._page(error=str(exc))
+                        saved = next((p for p in pipeline.pending_submissions(conn) if p["id"] == post_id), None)
+                        camp = campaigns.by_id(campaigns.load(settings.data_dir)).get(saved["campaign_id"]) if saved else None
+                        label, _ = deadline_label(saved, camp) if saved else ("", True)
+                        if label:
+                            return self._redirect("/?" + urlencode({"notice": (
+                                f"Link saved. Now submit it on the campaign page: {label}.")}) + "#links")
                 elif self.path == "/labels/done":
                     youtube.clear_label_todo(conn)
                 elif self.path == "/repost":

@@ -61,6 +61,8 @@ class Campaign:
     paid_label: bool = True  # False if the program forbids the platforms' own paid-promotion / paid-partnership switches
     trim_start: float = 0.0  # seconds cut from the start of every source video (rating cards, intros)
     trim_end: float = 0.0    # seconds cut from the end of every source video (logos, end cards)
+    submit_within_minutes: int = 0  # the program only accepts a link submitted this soon after posting (0: no limit)
+    keep_live_days: int = 0         # posts must stay up this long (0: not stated)
     disclosure_line: str = ""  # e.g. "#Ad": the caption is the text, then this alone on the next line, then at most 3 hashtags
     active: bool = True
     ends_on: str | None = None
@@ -130,6 +132,15 @@ def approved_captions(text: str) -> list[str]:
     are removed, since the campaign wants the caption exactly as written and a bullet isn't part of it."""
     lines = (line.strip().lstrip(BULLETS + " \t").strip() for line in text.splitlines())
     return list(dict.fromkeys(line for line in lines if line))
+
+
+def _whole(value: str, label: str, maximum: int) -> int:
+    value = (value or "").strip()
+    if not value:
+        return 0
+    if not value.isdigit() or int(value) > maximum:
+        raise CampaignError(f"{label} must be a whole number from 0 to {maximum}.")
+    return int(value)
 
 
 def _seconds(value: str, label: str) -> float:
@@ -209,6 +220,8 @@ def from_form(form: dict[str, str], platforms: list[str]) -> Campaign:
         disclosure_line=_disclosure(form.get("disclosure_line", "")),
         trim_start=_seconds(form.get("trim_start", ""), "Skip at the start"),
         trim_end=_seconds(form.get("trim_end", ""), "Skip at the end"),
+        submit_within_minutes=_whole(form.get("submit_within_minutes", ""), "Submit within", 1440),
+        keep_live_days=_whole(form.get("keep_live_days", ""), "Keep posts up for", 365),
         paid_label=form.get("paid_label") == "on",
         active=form.get("active", "on") == "on",
         ends_on=ends_on,

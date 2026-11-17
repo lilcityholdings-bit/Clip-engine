@@ -1332,3 +1332,104 @@ def test_an_untitled_combined_video_gets_claudes_caption_not_the_campaign_name(t
     assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube")}, 2) == 1
     title = conn.execute("SELECT title FROM clips").fetchone()[0]
     assert title == "The drone lifts off the dock"
+
+
+# --- submit timer, phone layout, posting checklist ----------------------------------------------------------------
+
+def _strict(tmp_path, **kw):
+    camp = campaigns.Campaign(id="sega", name="SEGA Metaphor", program_url="https://contentrewards.com/c/x", rate_per_1k_views=1.5,
+                              sources=[], allow_music=False, paid_label=False, disclosure_line="#Ad",
+                              submit_within_minutes=30, keep_live_days=30, **kw)
+    campaigns.save(tmp_path, camp)
+    return camp
+
+
+def test_submit_deadline_and_its_label():
+    from datetime import datetime, timezone
+    now = datetime(2026, 11, 17, 19, 20, tzinfo=timezone.utc)  # 2:20pm ET
+    deadline, left = pipeline.submit_deadline("2026-11-17 19:15:00", 30, now)
+    assert deadline.hour == 19 and deadline.minute == 45 and left == 25
+    assert pipeline.submit_deadline("2026-11-17 18:00:00", 30, now)[1] == 0
+    assert pipeline.submit_deadline("2026-11-17 19:15:00", 0, now) is None and pipeline.submit_deadline(None, 30, now) is None
+    camp = campaigns.Campaign(id="s", name="S", program_url="u", rate_per_1k_views=1, sources=[], submit_within_minutes=30)
+    label, ok = dashboard.deadline_label({"posted_at": "2026-11-17 19:15:00"}, camp, now)
+    assert ok and label == "Submit by 2:45pm ET, 25 min left"
+    label, ok = dashboard.deadline_label({"posted_at": "2026-11-17 18:00:00"}, camp, now)
+    assert not ok and "closed at 1:30pm ET" in label and "Post again" in label
+    assert dashboard.deadline_label({"posted_at": "2026-11-17 18:00:00"}, None, now) == ("", True)
+
+
+def test_links_to_submit_show_the_deadline_and_can_be_marked_one_by_one(server, tmp_path):
+    base, conn = server
+    _strict(tmp_path)
+    ids = []
+    for title in ("First post", "Second post"):
+        cid = conn.execute("INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags,"
+                           " arms) VALUES ('s', 'sega', 0, 20, ?, 'd', '[]', '{}')", (title,)).lastrowid
+        ids.append(conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at, url, posted_at) VALUES"
+                                " (?, 'tiktok', 'posted', datetime('now'), 'https://tiktok.com/t/' || ?, datetime('now', '-5 minutes'))",
+                                (cid, title[:5])).lastrowid)
+    conn.commit()
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Submit by" in page and "min left" in page and "Open campaign page" in page and "Copy link" in page
+    assert "2</b> links to submit &middot; Submit by" in page  # the to-do bar shows the deadline too
+    _get(base + "/submitted/one", "s3cret", data=f"id={ids[0]}&back=/%23links".encode())
+    left = [p["id"] for p in pipeline.pending_submissions(conn)]
+    assert left == [ids[1]]
+
+
+def test_saving_a_link_tells_you_the_submit_deadline(server, tmp_path):
+    base, conn = server
+    _strict(tmp_path)
+    cid = conn.execute("INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms)"
+                       " VALUES ('s', 'sega', 0, 20, 'Clip', 'd', '[]', '{}')").lastrowid
+    pid = conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'tiktok', 'ready', datetime('now'))",
+                       (cid,)).lastrowid
+    conn.commit()
+    page = _get(base + "/manual/save", "s3cret", data=f"id={pid}&url=https%3A%2F%2Ftiktok.com%2Ft%2Fz".encode()).read().decode()
+    assert "Link saved. Now submit it on the campaign page: Submit by" in page
+    assert "30 min left" in page or "29 min left" in page
+
+
+def test_checklist_follows_the_campaign_rules_and_shows_before_posting(server, tmp_path):
+    camp = campaigns.Campaign(id="sega", name="SEGA", program_url="u", rate_per_1k_views=1, sources=[], allow_music=False,
+                              paid_label=False, disclosure_line="#Ad", submit_within_minutes=30, keep_live_days=30)
+    items = dashboard.campaign_checklist(camp)
+    assert any("#Ad sits alone" in i for i in items) and "Don't add any sound or music." in items
+    assert any("Don't switch on Paid partnership" in i for i in items) and any("within 30 minutes" in i for i in items)
+    assert any("Don't delete the post for 30 days" in i for i in items)
+    plain = dashboard.campaign_checklist(campaigns.Campaign(id="r", name="R", program_url="u", rate_per_1k_views=1, sources=[]))
+    assert not any("sound" in i or "30" in i for i in plain) and any("paid-partnership label" in i for i in plain)
+    assert dashboard.campaign_checklist(None) == []
+    base, conn = server
+    _strict(tmp_path)
+    f = tmp_path / "clips" / ("q" * 32 + ".mp4")
+    f.parent.mkdir(exist_ok=True)
+    f.write_bytes(b"v")
+    cid = conn.execute("INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms,"
+                       " file_path, media_token) VALUES ('s', 'sega', 0, 20, 'Clip', 'd', '[]', '{}', ?, ?)",
+                       (str(f), "q" * 32)).lastrowid
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'tiktok', 'ready', datetime('now'))", (cid,))
+    conn.commit()
+    page = _get(base + "/", "s3cret").read().decode()
+    assert "Before you post" in page and "Don&#x27;t add any sound or music." in page
+    assert "Before you post" in _get(f"{base}/clip/{cid}", "s3cret").read().decode()
+
+
+def test_phone_layout_puts_everyday_things_first_and_the_rest_under_more(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    page = _get(base + "/", "s3cret").read().decode()
+    more = page.index('<details id="more"')
+    assert page.index("Make clips now") < more and page.index('id="links"') < more and page.index('id="campaigns"') < more
+    assert page.index('id="settings"') > more and page.index("Trending now") > more and page.index("estimated earnings") > more
+    assert "openFor(location.hash)" in page  # the Settings shortcut opens the More box
+
+
+def test_campaign_form_takes_the_submit_window_and_keep_days():
+    form = {"name": "Sega", "program_url": "https://w", "rate": "1", "submit_within_minutes": "30", "keep_live_days": "30"}
+    camp = campaigns.from_form(form, ["tiktok"])
+    assert camp.submit_within_minutes == 30 and camp.keep_live_days == 30
+    for bad in ("x", "-5", "2000", "1.5"):
+        with pytest.raises(campaigns.CampaignError, match="Submit within"):
+            campaigns.from_form({**form, "submit_within_minutes": bad}, ["tiktok"])

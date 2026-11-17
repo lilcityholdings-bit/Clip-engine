@@ -981,11 +981,22 @@ def earnings(conn: sqlite3.Connection, settings: Settings) -> list[dict]:
 
 def pending_submissions(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
-        "SELECT p.id, c.campaign_id, p.platform, p.url, c.title FROM posts p JOIN clips c ON c.id = p.clip_id"
+        "SELECT p.id, c.campaign_id, p.platform, p.url, c.title, p.posted_at, c.id AS clip_id FROM posts p"
+        " JOIN clips c ON c.id = p.clip_id"
         " WHERE c.campaign_id IS NOT NULL AND p.status = 'posted' AND p.submitted_at IS NULL AND p.url != ''"
-        " ORDER BY c.campaign_id, p.posted_at"
+        " ORDER BY p.posted_at"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def submit_deadline(posted_at: str | None, minutes: int, now: datetime | None = None):
+    """(deadline, minutes left) for a post a campaign only accepts within `minutes` of posting; None if no limit.
+    posted_at is the UTC text the database keeps; minutes left is 0 once the window has closed."""
+    if not minutes or not posted_at:
+        return None
+    deadline = datetime.fromisoformat(posted_at).replace(tzinfo=timezone.utc) + timedelta(minutes=minutes)
+    now = now or datetime.now(timezone.utc)
+    return deadline, max(0, int((deadline - now).total_seconds() // 60))
 
 
 def mark_submitted(conn: sqlite3.Connection, post_ids: list[int]) -> None:
