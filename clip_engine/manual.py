@@ -101,6 +101,36 @@ def pop(conn: sqlite3.Connection) -> dict | None:
     return items[0]
 
 
+# The item being clipped right now is kept here too, so a restart in the middle of a run (a deploy, a crash)
+# doesn't lose your upload: on start-up it goes back to the front of the queue.
+INFLIGHT_KEY = "manual_inflight"
+MAX_RECOVERIES = 3
+
+
+def claim(conn: sqlite3.Connection, item: dict) -> None:
+    db.put(conn, INFLIGHT_KEY, json.dumps(item))
+
+
+def release(conn: sqlite3.Connection) -> None:
+    db.put(conn, INFLIGHT_KEY, "")
+
+
+def recover_inflight(conn: sqlite3.Connection) -> bool:
+    """Put an item that was being clipped when the server stopped back at the front of the queue (a few tries,
+    then its files are deleted). Returns True if there was one."""
+    raw = db.get(conn, INFLIGHT_KEY, "")
+    if not raw:
+        return False
+    item = json.loads(raw)
+    release(conn)
+    attempts = item.get("attempts", 0) + 1
+    if attempts >= MAX_RECOVERIES:
+        discard(item)
+        return False
+    add(conn, {**item, "attempts": attempts}, front=True)
+    return True
+
+
 def discard(item: dict) -> None:
     """Delete the uploaded file(s) of a queue item that won't be used."""
     if item.get("kind") == "file":
@@ -171,5 +201,10 @@ def finish_batch(conn: sqlite3.Connection, batch_id: str, item: dict) -> int:
     db.put(conn, BATCH_KEY, json.dumps(batches))
     if not batch or not batch["files"]:
         raise UploadError("Those files did not arrive. Try again.")
-    add(conn, {**item, "kind": "project", "files": batch["files"]})
+    if len(batch["files"]) == 1 and not is_image(batch["files"][0]):
+        # one video has nothing to be combined with: cut it into clips instead
+        add(conn, {**item, "kind": "file", "ref": batch["files"][0],
+                   "title": item.get("title") or Path(batch["files"][0]).stem[:60]})
+    else:
+        add(conn, {**item, "kind": "project", "files": batch["files"]})
     return len(batch["files"])

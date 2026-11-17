@@ -1165,3 +1165,111 @@ def test_every_clip_list_has_a_delete(server, tmp_path):
     assert "Delete video" not in _get(base + "/", "s3cret").read().decode()
     _get(base + "/clip/delete", "s3cret", data=f"id={cid}".encode())
     assert not f.exists()
+
+
+# --- Your clips: a library by campaign, and a page for each clip -----------------------------------------------
+
+def _clip_row(conn, tmp_path, campaign, title, status, token, platform="tiktok", url=""):
+    f = tmp_path / "clips" / f"{token}.mp4"
+    f.parent.mkdir(exist_ok=True)
+    f.write_bytes(b"video")
+    cid = conn.execute(
+        "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms, file_path,"
+        " media_token) VALUES ('s', ?, 0, 25, ?, 'caption line\n#Ad\n#tag', '[]', '{}', ?, ?)",
+        (campaign, title, str(f), token)).lastrowid
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at, url) VALUES (?, ?, ?, datetime('now'), ?)",
+                 (cid, platform, status, url))
+    conn.commit()
+    return cid
+
+
+def test_your_clips_lists_every_clip_by_campaign_and_each_has_its_own_page(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    campaigns.save(tmp_path, campaigns.Campaign(id="ring", name="Ring Drone", program_url="https://w", rate_per_1k_views=1,
+                                                sources=[]))
+    waiting = _clip_row(conn, tmp_path, "pod", "Clip waiting", "review", "a" * 32)
+    approved = _clip_row(conn, tmp_path, "pod", "Clip approved", "ready", "b" * 32)
+    posted = _clip_row(conn, tmp_path, "ring", "Clip posted", "posted", "c" * 32, url="https://tiktok.com/t/abc")
+    _clip_row(conn, tmp_path, "ring", "Clip removed", "rejected", "d" * 32)  # never listed
+    page = _get(base + "/", "s3cret").read().decode()
+    assert 'id="clips"' in page and "Your clips" in page and "Pod Show (2)" in page and "Ring Drone (1)" in page
+    assert all(f'href="/clip/{i}"' in page for i in (waiting, approved, posted)) and "Clip removed" not in page.split('id="clips"')[1].split("</section>")[0]
+    assert "Waiting for your approval" in page and "Approved" in page
+
+    detail = _get(f"{base}/clip/{waiting}", "s3cret").read().decode()
+    assert f'src="/media/{"a" * 32}.mp4"' in detail and "caption line" in detail and "Back to Your clips" in detail
+    assert all(w in detail for w in ("Approve", "Reject", "Delete", "Download", "waiting for your approval"))
+    after = _get(f"{base}/review/approve", "s3cret", data=f"id={waiting}&choose=1&platforms=tiktok&back=/clip/{waiting}".encode()).read().decode()
+    assert "ready to post from your phone" in after and "Back to Your clips" in after  # approving lands back on its page
+
+    done = _get(f"{base}/clip/{posted}", "s3cret").read().decode()
+    assert "open the post" in done and "Post again on TikTok" in done and "Delete video" in done and "Approve" not in done
+
+    after = _get(f"{base}/review/reject", "s3cret", data=f"id={approved}&back=/%23clips".encode()).read().decode()
+    assert "Your clips" in after  # rejecting returns to the library
+    gone = _get(f"{base}/clip/{waiting}", "s3cret").read().decode()  # approved above, still there
+    assert "Clip waiting" in gone
+    _get(f"{base}/clip/delete", "s3cret", data=f"id={waiting}&back=/%23clips".encode())
+    try:
+        _get(f"{base}/clip/{waiting}", "s3cret")
+        raise AssertionError("a deleted clip's page should be gone")
+    except urllib.error.HTTPError as err:
+        assert err.code == 404 and "not here any more" in err.read().decode()
+
+
+def test_clip_pages_need_the_password_and_the_library_says_when_clips_are_being_made(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _get(f"{base}/clip/1", None)
+    assert err.value.code == 401
+    assert 'id="clips"' not in _get(base + "/", "s3cret").read().decode()  # nothing yet, nothing running
+    pipeline.set_status(conn, "running", "Making clips now.")
+    page = _get(base + "/", "s3cret").read().decode()
+    assert 'id="clips"' in page and "Making clips now." in page.split('id="clips"')[1]
+
+
+# --- a restart in the middle of a run must not lose the upload; one video is cut, not combined --------------------
+
+def test_an_upload_being_clipped_when_the_server_restarts_goes_back_in_the_queue(tmp_path, monkeypatch):
+    conn = db.connect(tmp_path / "i.db")
+    camp = _campaign(tmp_path)
+    video = tmp_path / "uploads" / "ep.mp4"
+    video.parent.mkdir()
+    video.write_bytes(b"v")
+    manual.add(conn, {"kind": "file", "ref": str(video), "campaign_id": "pod", "creator": "", "title": "Ep", "count": 3,
+                      "review": True})
+    monkeypatch.setattr(media, "duration", lambda p: 90.0)
+    assert pipeline.manual_job(conn, [camp], []) is not None and manual.queue(conn) == []  # popped, being clipped
+    assert json.loads(db.get(conn, manual.INFLIGHT_KEY))["ref"] == str(video)
+    assert manual.recover_inflight(conn) is True  # the server restarted: it is back, first in line
+    [item] = manual.queue(conn)
+    assert item["ref"] == str(video) and item["attempts"] == 1 and item["count"] == 3 and item["review"] is True
+    assert db.get(conn, manual.INFLIGHT_KEY) == "" and manual.recover_inflight(conn) is False  # nothing twice
+    manual.pop(conn)
+    manual.claim(conn, {"kind": "file", "ref": str(video), "campaign_id": "pod", "attempts": 2})
+    assert manual.recover_inflight(conn) is False and not video.exists() and manual.queue(conn) == []  # tried 3 times: given up
+
+
+def test_a_finished_run_leaves_nothing_in_flight(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["Heismay steps into the light"])
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube")}, 2) >= 1
+    assert db.get(conn, manual.INFLIGHT_KEY) == "" and manual.queue(conn) == []
+    assert manual.recover_inflight(conn) is False
+
+
+def test_a_single_video_in_a_combine_batch_is_cut_into_clips(tmp_path):
+    conn = db.connect(tmp_path / "s.db")
+    video = manual.save_upload(io.BytesIO(b"x" * 10), 10, "trailer.mp4", tmp_path)
+    manual.add_to_batch(conn, "onevideo1", video)
+    assert manual.finish_batch(conn, "onevideo1", {"campaign_id": "pod", "count": 3, "review": True, "title": ""}) == 1
+    [item] = manual.queue(conn)
+    assert item["kind"] == "file" and item["ref"] == str(video) and item["count"] == 3 and item["review"] is True
+    photo = manual.save_upload(io.BytesIO(b"x" * 10), 10, "one.jpg", tmp_path)  # a single photo still becomes a video
+    manual.add_to_batch(conn, "onephoto11", photo)
+    manual.finish_batch(conn, "onephoto11", {"campaign_id": "pod", "count": 1})
+    assert manual.queue(conn)[-1]["kind"] == "project"

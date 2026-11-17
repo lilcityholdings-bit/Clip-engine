@@ -15,7 +15,7 @@ import time
 import anthropic
 import requests
 
-from . import dashboard, db, pipeline, platforms, strategy
+from . import dashboard, db, manual, pipeline, platforms, strategy
 from .config import Settings
 from . import youtube
 from .youtube import YouTube
@@ -166,6 +166,8 @@ def main(argv: list[str]) -> int:
     elif command == "score":
         pipeline.score(conn, settings, pubs)
     elif command == "run":
+        if manual.recover_inflight(conn):
+            log.info("a video that was being clipped when the server stopped is back in the queue")
         dashboard.start(base)
         signature = connection_signature(conn, base)
         while True:

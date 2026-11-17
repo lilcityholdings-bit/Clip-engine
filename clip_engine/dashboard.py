@@ -19,6 +19,7 @@ POST /campaigns/save   add or update a campaign from the form
 POST /campaigns/toggle pause or resume one campaign
 POST /campaigns/delete remove a campaign added from the dashboard
 GET  /media/<t>.mp4    rendered clip, served under an unguessable token
+GET  /clip/<id>   one clip: watch it, approve, reject, delete, download
 GET  /health           liveness check for Railway
 GET  /privacy          public privacy policy (Google asks for one)
 GET  /connect/youtube  start Google sign-in; /oauth/youtube/callback finishes it
@@ -46,6 +47,7 @@ from .config import Settings
 
 log = logging.getLogger(__name__)
 MEDIA_RE = re.compile(r"^/media/([0-9a-f]{32})\.mp4$")
+CLIP_RE = re.compile(r"^/clip/(\d+)$")
 RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 DIMENSIONS = {"music": "Music", "campaign": "Campaign", "topic": "Topic", "format": "Format", "length": "Clip length",
               "title_style": "Title style", "post_hour": "Posting time"}
@@ -84,6 +86,11 @@ myaccount.google.com/permissions</a>.</p>
 including the Limited Use requirements.</p>
 </body></html>"""
 
+STATE_LABELS = {"waiting": "Waiting for your approval", "approved": "Approved", "posted": "Posted"}
+POST_STATUS_LABELS = {"review": "waiting for your approval", "ready": "ready to post from your phone",
+                      "queued": "scheduled", "posted": "posted", "rejected": "removed", "expired": "removed",
+                      "skipped": "skipped", "failed": "failed"}
+
 PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Clip Engine</title>
 <style>
@@ -115,6 +122,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 {banner}
 {todo}
 {start}
+{library}
 {review}
 {ready}
 {scheduled}
@@ -138,6 +146,11 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 <section><h2>Recent problems</h2>{errors}</section>
 <section id="settings"><h2>Settings</h2>{settings_html}</section>
 </main></body></html>"""
+
+CLIP_PAGE = ("""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title><style>"""
+             + PAGE.split("<style>", 1)[1].split("</style>", 1)[0].replace("{{", "{").replace("}}", "}")
+             + "</style></head><body><main>{body}</main></body></html>")
 
 
 def _table(headers: list[str], rows: list[list[str]], empty: str) -> str:
@@ -262,7 +275,7 @@ def _todo(conn, settings: Settings) -> str:
     if not items and not has_campaign:
         return ""  # still setting up: the Getting started list leads
     head = "".join(items) if items else '<span class="good">&#10003; Nothing needs you right now.</span>'
-    shortcuts = ['<a href="#campaigns">Campaigns</a>']
+    shortcuts = ['<a href="#clips">Your clips</a>', '<a href="#campaigns">Campaigns</a>']
     if campaigns.live(campaigns.load(settings.data_dir)):
         shortcuts.append('<a href="#own-video">Add a video</a>')
     shortcuts.append('<a href="#settings">Settings</a>')
@@ -424,6 +437,93 @@ def _platform_checks(platforms: list[str], checked: list[str] | None = None) -> 
                    f'{html.escape(PLATFORM_NAMES.get(p, p))}</label>' for p in platforms)
 
 
+def _clip_meta(c: dict) -> str:
+    return f'{c["seconds"]:.0f}s &middot; {STATE_LABELS[c["state"]]}'
+
+
+def _library(conn, settings: Settings) -> str:
+    """Your clips: every recent clip, grouped by campaign. Tap one to open its own page."""
+    clips = pipeline.clip_library(conn)
+    running = (pipeline.status(conn) or {}).get("state") == "running"
+    if not clips and not running:
+        return ""
+    e = html.escape
+    names = {c.id: c.name for c in campaigns.load(settings.data_dir)}
+    groups: dict[str, list[dict]] = {}
+    for c in clips:
+        groups.setdefault(c["campaign_id"] or "", []).append(c)
+    blocks = []
+    for campaign_id, items in groups.items():
+        rows = "".join(
+            f'<div class="card"><b>{e(c["title"])}</b><div class="muted">{_clip_meta(c)}</div>'
+            f'<div class="row" style="margin-top:6px"><a class="button" href="/clip/{c["id"]}">Open</a></div></div>'
+            for c in items)
+        blocks.append(f'<details open><summary>{e(names.get(campaign_id, campaign_id or "Other clips"))} '
+                      f'({len(items)})</summary>{rows}</details>')
+    working = ('<p class="muted"><b>Making clips now.</b> New ones appear here in a few minutes; this page refreshes by '
+               'itself.</p>' if running else "")
+    return ('<section id="clips"><h2>Your clips</h2><p class="muted">Tap Open on a clip to watch it and then approve it, '
+            f'reject it, delete it or download it.</p>{working}{"".join(blocks)}</section>')
+
+
+def _clip_page(conn, settings: Settings, clip_id: int) -> str | None:
+    """The page of one clip: the video, its caption, where it goes, and what you can do with it."""
+    c = pipeline.clip_detail(conn, clip_id)
+    if c is None:
+        return None
+    e = html.escape
+    name = next((x.name for x in campaigns.load(settings.data_dir) if x.id == c["campaign_id"]), c["campaign_id"] or "")
+    auto = pipeline.auto_platforms(conn)
+    token = e(c["media_token"] or "")
+    video = (f'<video controls playsinline preload="metadata" style="width:100%;max-height:70vh;background:#000" '
+             f'src="/media/{token}.mp4"></video>' if c["has_video"] else
+             '<p class="muted">This clip\'s video has been removed.</p>')
+    where = []
+    for p in c["posts"]:
+        label = POST_STATUS_LABELS.get(p["status"], p["status"])
+        when = f' &middot; {e(post_time_label(p["scheduled_at"]))}' if p["status"] == "queued" else ""
+        link = f' &middot; {_link(p["url"], "open the post")}' if p["status"] == "posted" and p["url"] else ""
+        where.append(f'<li><b>{e(PLATFORM_NAMES.get(p["platform"], p["platform"]))}</b>: {e(label)}{when}{link}</li>')
+    actions = []
+    if c["has_video"]:
+        actions.append(f'<a class="button" href="/media/{token}.mp4?download=1" download="clip-{c["id"]}.mp4">Download</a>')
+    review = [p for p in c["posts"] if p["status"] == "review"]
+    if review:
+        platforms = [p["platform"] for p in review]
+        first = min(p["scheduled_at"] for p in review)
+        times = "".join(f'<label>{e(PLATFORM_NAMES.get(p, p))} posts at <small>(Eastern time)</small></label>'
+                        + _time_box("at", first) for p in platforms if p in auto)
+        actions.insert(0, (
+            f'<form method="post" action="/review/approve"><input type="hidden" name="id" value="{c["id"]}">'
+            f'<input type="hidden" name="choose" value="1"><input type="hidden" name="back" value="/clip/{c["id"]}">'
+            f'<div class="checks"><b>Post to:</b> {_platform_checks(platforms)}</div>{times}'
+            f'<div class="row" style="margin-top:8px"><button class="primary">Approve</button></div></form>'))
+        actions.append(f'<form class="inline" method="post" action="/review/reject" onsubmit="return confirm(\'Reject '
+                       f'this clip? It will be deleted.\')"><input type="hidden" name="id" value="{c["id"]}">'
+                       f'<input type="hidden" name="back" value="/#clips"><button>Reject</button></form>')
+    if c["state"] in ("waiting", "approved"):
+        actions.append(_delete_form(c["id"], back="/#clips"))
+    if c["state"] == "approved":
+        actions.append('<a class="button" href="/#ready">Go to Ready to post</a>')
+    if c["state"] == "posted" and c["has_video"]:
+        again = next((x for x in pipeline.repostable(conn) if x["id"] == c["id"]), None)
+        for p in (again or {}).get("platforms", []):
+            actions.append(f'<form class="inline" method="post" action="/repost"><input type="hidden" name="id" '
+                           f'value="{c["id"]}"><input type="hidden" name="platform" value="{p}"><input type="hidden" '
+                           f'name="back" value="/clip/{c["id"]}"><button>Post again on '
+                           f'{e(PLATFORM_NAMES.get(p, p))}</button></form>')
+        actions.append(f'<form class="inline" method="post" action="/clip/delete-video" onsubmit="return confirm(\'Delete '
+                       f'this video for good? You will not be able to post it again.\')"><input type="hidden" name="id" '
+                       f'value="{c["id"]}"><input type="hidden" name="back" value="/#clips"><button>Delete video</button></form>')
+    return (CLIP_PAGE.replace("{title}", e(c["title"])).replace("{body}", (
+        f'<p><a href="/#clips">&larr; Back to Your clips</a></p><h1>{e(c["title"])}</h1>'
+        f'<div class="muted">{e(name)} &middot; {_clip_meta(c)}</div>'
+        f'<section>{video}</section>'
+        f'<section><h2>Caption</h2><div style="white-space:pre-wrap">{e(c["description"])}</div></section>'
+        f'<section><h2>Where it goes</h2><ul>{"".join(where)}</ul></section>'
+        f'<section><h2>What do you want to do?</h2><div class="row">{"".join(actions)}</div></section>')))
+
+
 def _review(conn, settings: Settings) -> str:
     """Clips waiting for approval, each with a playable preview."""
     waiting = pipeline.awaiting_review(conn)
@@ -473,9 +573,10 @@ def _time_box(name: str, scheduled_at: str | None) -> str:
             f'style="font:inherit;padding:9px">')
 
 
-def _delete_form(clip_id: int) -> str:
+def _delete_form(clip_id: int, back: str = "") -> str:
+    keep = f'<input type="hidden" name="back" value="{html.escape(back)}">' if back else ""
     return (f'<form class="inline" method="post" action="/clip/delete" onsubmit="return confirm(\'Delete this clip? '
-            f'It will not be posted.\')"><input type="hidden" name="id" value="{clip_id}"><button>Delete</button></form>')
+            f'It will not be posted.\')"><input type="hidden" name="id" value="{clip_id}">{keep}<button>Delete</button></form>')
 
 
 def _scheduled(conn, settings: Settings) -> str:
@@ -771,6 +872,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
     return PAGE.format(
         banner=banner,
         start=_getting_started(conn, settings),
+        library=_library(conn, settings),
         review=_review(conn, settings),
         ready=_ready(conn, settings),
         scheduled=_scheduled(conn, settings),
@@ -900,6 +1002,20 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                 if not path.exists():
                     return self._send(404, b"not found", "text/plain")
                 return self._send_video(path, download="download=1" in url.query)
+            clip = CLIP_RE.match(url.path)
+            if clip:
+                if not self._authorized():
+                    return self._deny()
+                conn = db.connect(settings.db_path)
+                try:
+                    page = _clip_page(conn, settings, int(clip.group(1)))
+                finally:
+                    conn.close()
+                if page is None:
+                    return self._send(404, CLIP_PAGE.replace("{title}", "Clip").replace("{body}", (
+                        '<p><a href="/#clips">&larr; Back to Your clips</a></p><h1>That clip is not here any more</h1>'
+                        '<p class="muted">It was rejected, deleted or has expired.</p>')).encode())
+                return self._send(200, page.encode())
             if url.path != "/":
                 return self._send(404, b"not found", "text/plain")
             if not self._authorized():
@@ -1024,8 +1140,10 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
             return bool(source) and urlsplit(source).netloc == self.headers.get("Host", "")
 
         def _form(self) -> dict[str, list[str]]:
-            length = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
-            return parse_qs(self.rfile.read(length).decode("utf-8", "replace"), keep_blank_values=True)
+            if getattr(self, "_form_cache", None) is None:  # the body can only be read once per request
+                length = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
+                self._form_cache = parse_qs(self.rfile.read(length).decode("utf-8", "replace"), keep_blank_values=True)
+            return self._form_cache
 
         def _redirect(self, location: str, code: int = 303) -> None:
             self.send_response(code)
@@ -1033,6 +1151,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
             self.end_headers()
 
         def do_POST(self):
+            self._form_cache = None
             if not self._authorized():
                 return self._deny()
             if not self._same_origin():
@@ -1141,7 +1260,8 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     return self._send(404, b"not found", "text/plain")
             finally:
                 conn.close()
-            self._redirect("/")
+            back = self._form().get("back", [""])[0]  # a page's own buttons send you back to it
+            self._redirect(back if back.startswith("/") and not back.startswith("//") else "/")
 
         def _live_campaign(self, campaign_id: str):
             return campaigns.by_id(campaigns.live(campaigns.load(settings.data_dir))).get(campaign_id)
@@ -1199,10 +1319,15 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                                 "length": manual.clean_length(query.get("length", "")),
                                 "count": manual.clean_count(query.get("count", "")),
                                 "review": query.get("review") == "1"})
-                            videos = manual.queue(conn)[-1]["count"]
-                            made = "one video" if videos == 1 else f"{videos} different videos"
+                            queued = manual.queue(conn)[-1]
+                            if queued["kind"] == "file":  # a single video is cut into clips, not combined
+                                clips = queued["count"]
+                                made = f"cut into {clips} clip{'s' if clips > 1 else ''}"
+                            else:
+                                videos = queued["count"]
+                                made = "made into " + ("one video" if videos == 1 else f"{videos} different videos")
                             return reply(200, start_now(conn, settings, f"{count} file{'s' if count > 1 else ''} "
-                                                                        f"uploaded and will be made into {made}."))
+                                                                        f"uploaded and will be {made}."))
                     except manual.UploadError as exc:
                         return reply(400, str(exc))
                     return reply(200, "File added.")

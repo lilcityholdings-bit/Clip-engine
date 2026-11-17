@@ -150,6 +150,7 @@ def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
     """The oldest video you handed over (uploaded or by link) whose campaign is still live."""
     by_id = campaigns.by_id(live)
     while (item := manual.pop(conn)) is not None:
+        manual.claim(conn, item)  # until its clips are made, a restart puts it back in the queue
         campaign = by_id.get(item.get("campaign_id"))
         if campaign is None:
             log.info("dropping %s: its campaign isn't live", item)
@@ -183,6 +184,7 @@ def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
         if whole:
             arms["format"] = "short"  # the video is built vertical
         return Job(arms, src, campaigns.caption_lines(campaign, src, arms["format"]), campaign, item, whole, windows, titles)
+    manual.release(conn)
     return None
 
 
@@ -460,6 +462,40 @@ def post_now(conn: sqlite3.Connection, post_id: int) -> None:
     conn.commit()
 
 
+CLIP_COLUMNS = ("c.id, c.title, c.description, c.campaign_id, c.media_token, c.file_path, c.created_at, c.ai_score,"
+                " c.end_sec - c.start_sec AS seconds")
+
+
+def _clip_info(conn: sqlite3.Connection, c) -> dict | None:
+    """One clip with its posts and a plain state: waiting (for your approval), approved (ready to post or
+    scheduled) or posted. A clip with nothing open and nothing posted (rejected, deleted, expired) is None."""
+    posts = [dict(p) for p in conn.execute(
+        "SELECT id, platform, status, scheduled_at, url FROM posts WHERE clip_id = ? ORDER BY id", (c["id"],))]
+    statuses = {p["status"] for p in posts}
+    if "review" in statuses:
+        state = "waiting"
+    elif statuses & {"ready", "queued"}:
+        state = "approved"
+    elif "posted" in statuses:
+        state = "posted"
+    else:
+        return None
+    path = Path(c["file_path"]) if c["file_path"] else None
+    return {**dict(c), "posts": posts, "state": state, "has_video": bool(path and path.exists())}
+
+
+def clip_library(conn: sqlite3.Connection, days: int = 14) -> list[dict]:
+    """Every recent clip you can still act on or look back at, newest first, for the Your clips section."""
+    rows = conn.execute(f"SELECT {CLIP_COLUMNS} FROM clips c WHERE c.created_at >= datetime('now', ?) ORDER BY c.id DESC",
+                        (f"-{days} days",)).fetchall()
+    return [info for info in (_clip_info(conn, r) for r in rows) if info]
+
+
+def clip_detail(conn: sqlite3.Connection, clip_id: int) -> dict | None:
+    row = conn.execute(f"SELECT {CLIP_COLUMNS} FROM clips c WHERE c.id = ?", (clip_id,)).fetchone()
+    return _clip_info(conn, row) if row else None
+
+
 def save_manual_post(conn: sqlite3.Connection, post_id: int, url: str) -> None:
     """Record the link of a clip you posted yourself; views are tracked from it."""
     url = url.strip()
@@ -613,6 +649,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
         _note(conn, "None of this campaign's platforms are ticked under Settings, Post new clips to.")
         if job.item:
             manual.add(conn, job.item, front=True)  # keep your video for when an account is ticked
+            manual.release(conn)
         return 0
     conn.execute(
         "INSERT OR IGNORE INTO sources (identifier, title, creator, license_url, source_url, topic)"
@@ -753,6 +790,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                 manual.discard(job.item)  # used (or given up on): free the disk
             else:  # it failed part-way: keep your upload and try it again on the next run
                 manual.add(conn, {**job.item, "attempts": attempts}, front=True)
+        manual.release(conn)
     return queued
 
 
