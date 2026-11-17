@@ -886,7 +886,7 @@ def test_todo_bar_lists_what_needs_the_owner(server, tmp_path, monkeypatch):
     first = _queue_for_review(conn, tmp_path)
     _queue_for_review(conn, tmp_path, token="d" * 32)
     page = _get(base + "/", "s3cret").read().decode()
-    assert '<b>2</b> clips to approve' in page and 'href="#review"' in page
+    assert '<b>2</b> clips to approve' in page and 'href="#clips"' in page
     _get(base + "/review/approve", "s3cret", data=f"id={first}".encode())
     conn.execute("UPDATE posts SET status = 'ready' WHERE clip_id = ? AND platform = 'tiktok'", (first,))
     conn.execute("UPDATE clips SET campaign_id = 'p' WHERE id = ?", (first,))

@@ -12,6 +12,7 @@ POST /settings/post-to  accounts new clips are made for
 POST /labels/done   clear the list of YouTube Shorts waiting for the paid-promotion tick
 POST /repost   post a recent campaign clip again on one account
 POST /post/schedule   set the time an automatic (YouTube) post goes out
+POST /clip/hide   take a posted clip off the Your clips list (its posts stay up)
 POST /clip/delete-video   delete a posted clip's saved video so it can't be posted again
 POST /clip/delete   delete a clip that has not been posted yet (waiting for approval, ready to post or scheduled)
 POST /post/now   send one queued automatic post at the next check instead of its scheduled time
@@ -129,15 +130,15 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 <form method="post" action="/{toggle}"><button class="primary">{toggle_label}</button></form>
 <form method="post" action="/run"><button>Make clips now</button></form>
 </div>{status}</section>
+{own_video}
 {library}
+<section id="links"><h2>Links to submit</h2>{pending}</section>
+<details id="more" style="margin-top:12px"><summary>More: campaigns, lists by step, earnings, trends and settings</summary>
+<section id="campaigns"><h2>Campaigns</h2>{campaigns}{campaign_form}</section>
 {review}
 {ready}
 {scheduled}
-<section id="links"><h2>Links to submit</h2>{pending}</section>
-{own_video}
 {repost}
-<section id="campaigns"><h2>Campaigns</h2>{campaigns}{campaign_form}</section>
-<details id="more" style="margin-top:12px"><summary>More: earnings, stats, trends and settings</summary>
 <section><div class="row">
 <div class="stat"><b>${earned}</b><span>estimated earnings</span></div>
 <div class="stat"><b>{views}</b><span>total views</span></div>
@@ -275,9 +276,9 @@ def _todo(conn, settings: Settings) -> str:
     links = len(pipeline.pending_submissions(conn))
     items = []
     if review:
-        items.append(f'<a class="button" href="#review"><b>{review}</b> clip{"s" if review > 1 else ""} to approve</a>')
+        items.append(f'<a class="button" href="#clips"><b>{review}</b> clip{"s" if review > 1 else ""} to approve</a>')
     if to_post:
-        items.append(f'<a class="button" href="#ready"><b>{to_post}</b> to post from your phone</a>')
+        items.append(f'<a class="button" href="#clips"><b>{to_post}</b> to post from your phone</a>')
     labels = len(youtube.label_todo(conn))
     if labels:
         items.append(f'<a class="button" href="#labels"><b>{labels}</b> YouTube label{"s" if labels > 1 else ""} to tick</a>')
@@ -339,7 +340,7 @@ def _status(conn) -> str:
 
 
 def _own_video(conn, settings: Settings) -> str:
-    """Hand the engine a video yourself: a file from your phone or a link, for campaigns that give you a download."""
+    """Add a video: pick the campaign, the file(s) and how many clips; everything else is under More options."""
     live = campaigns.live(campaigns.load(settings.data_dir))
     if not live:
         return ""
@@ -349,46 +350,37 @@ def _own_video(conn, settings: Settings) -> str:
     queue_html = ""
     if waiting:
         queue_html = ('<div class="muted" style="margin:8px 0">Waiting to be clipped: '
-                      + "; ".join(e(w.get("title") or (f"{len(w['files'])} files, one video" if w.get("kind") == "project" else w["ref"][-40:])) for w in waiting) + '</div>')
-    common = (f'<label>Campaign</label><select name="campaign" style="width:100%;font:inherit;padding:9px">{options}</select>'
-              '<label>Creator\'s name <small>(credited in the caption; optional)</small></label>'
-              '<input type="text" name="creator">'
-              '<label>Title <small>(optional; the post title when the campaign has no approved captions)</small></label><input type="text" name="title">')
+                      + "; ".join(e(w.get("title") or (f"{len(w['files'])} files" if w.get("kind") == "project" else w["ref"][-40:]))
+                                  for w in waiting) + '</div>')
+    campaign = f'<label>Campaign</label><select name="campaign" style="width:100%;font:inherit;padding:9px">{options}</select>'
+    count = ('<label>How many clips do you want? <small>(up to 4)</small></label>'
+             '<select name="count" style="width:100%;font:inherit;padding:9px">'
+             + "".join(f'<option value="{n}"{" selected" if n == 2 else ""}>{n}</option>' for n in range(1, manual.MAX_VIDEOS + 1))
+             + '</select>')
+    review = ('<label style="margin-top:8px"><input type="checkbox" name="review" checked> Let me watch each clip before it '
+              'can post</label>')
+    names = ('<label>Creator\'s name <small>(credited in the caption; optional)</small></label><input type="text" name="creator">'
+             '<label>Title <small>(optional; the post title when the campaign has no approved captions)</small></label>'
+             '<input type="text" name="title">')
     return (
-        '<section id="own-video"><h2>Add your own video</h2>'
-        '<p class="muted">Some campaigns give you a video to download instead of a channel to watch. Upload it here, '
-        'or paste its link, and the engine starts clipping it straight away, before anything else.</p>' + queue_html +
-        f'<details><summary>Upload videos or photos from this phone</summary>'
-        f'<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">{common}'
-        f'<label>Files <small>(videos and photos, up to {manual.MAX_UPLOAD_MB} MB each; pick several at once)</small></label>'
-        f'<input type="file" name="file" accept="video/*,image/*" multiple>'
-        f'<div class="checks" style="flex-direction:column;align-items:flex-start;margin-top:8px">'
-        f'<label><input type="radio" name="mode" value="combine" checked> <b>Combine</b> them into new videos, '
-        f'in a smart order (photos zoom slowly)</label>'
-        f'<label><input type="radio" name="mode" value="each"> Clip <b>each video</b> separately (videos only)</label></div>'
-        f'<label style="margin-top:8px">How many clips do you want? <small>(up to 4. Cutting one video: that many '
-        f'different moments. Combining: that many different videos, so give it enough files for each, about 6 to 10 '
-        f'photos or clips per video)</small></label>'
-        f'<select name="count" style="width:100%;font:inherit;padding:9px">'
-        + "".join(f'<option value="{n}"{" selected" if n == 2 else ""}>{n}</option>' for n in range(1, manual.MAX_VIDEOS + 1)) +
-        f'</select>'
-        f'<label style="margin-top:8px"><input type="checkbox" name="review" checked> Let me watch each clip before it '
-        f'can post (approve, reject or download it)</label>'
-        f'<label style="margin-top:8px">How long should each combined video be?</label>'
-        f'<select name="length" style="width:100%;font:inherit;padding:9px"><option value="30">15 to 30 seconds (best)</option>'
-        f'<option value="60">Up to 60 seconds</option></select>'
-        f'<div class="muted status" style="margin:6px 0"></div>'
-        f'<button class="primary" type="submit">Upload</button></form></details>'
-        f'<details style="margin-top:10px"><summary>Paste a link instead</summary>'
-        f'<form method="post" action="/manual-video/link">{common}'
-        f'<label>Video link</label><input type="url" name="url" placeholder="https://">'
-        f'<label style="margin-top:8px">How many clips do you want? <small>(up to 4)</small></label>'
-        f'<select name="count" style="width:100%;font:inherit;padding:9px">'
-        + "".join(f'<option value="{n}"{" selected" if n == 2 else ""}>{n}</option>' for n in range(1, manual.MAX_VIDEOS + 1)) +
-        f'</select>'
-        f'<label style="margin-top:8px"><input type="checkbox" name="review" checked> Let me watch each clip before it '
-        f'can post (approve, reject or download it)</label>'
-        f'<button class="primary" style="margin-top:10px">Add video</button></form></details>'
+        '<section id="own-video"><h2>Add a video</h2>' + queue_html +
+        '<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">' + campaign +
+        f'<label>Video or photos <small>(one video is cut into clips; several files are combined)</small></label>'
+        f'<input type="file" name="file" accept="video/*,image/*" multiple>' + count +
+        '<details style="margin-top:10px"><summary>More options</summary>' + names +
+        '<div class="checks" style="flex-direction:column;align-items:flex-start;margin-top:8px"><b>With several files:</b>'
+        '<label><input type="radio" name="mode" value="combine" checked> <b>Combine</b> them into new videos, in a smart '
+        'order (photos zoom slowly)</label>'
+        '<label><input type="radio" name="mode" value="each"> Clip <b>each video</b> separately (videos only)</label></div>'
+        '<label style="margin-top:8px">How long should each combined video be?</label>'
+        '<select name="length" style="width:100%;font:inherit;padding:9px"><option value="30">15 to 30 seconds (best)</option>'
+        '<option value="60">Up to 60 seconds</option></select>' + review + '</details>'
+        '<div class="muted status" style="margin:6px 0"></div>'
+        '<button class="primary" type="submit" style="margin-top:8px">Upload</button></form>'
+        '<details style="margin-top:12px"><summary>Paste a link instead</summary>'
+        '<form method="post" action="/manual-video/link">' + campaign +
+        '<label>Video link</label><input type="url" name="url" placeholder="https://">' + count + review + names +
+        '<button class="primary" style="margin-top:10px">Add video</button></form></details>'
         + UPLOAD_JS + '</section>')
 
 
@@ -467,14 +459,15 @@ def deadline_label(post: dict, campaign, now: datetime | None = None) -> tuple[s
     at = deadline.astimezone(ZoneInfo(pipeline.LOCAL_ZONE)).strftime("%-I:%M%p").replace("AM", "am").replace("PM", "pm")
     if left > 0:
         return f"Submit by {at} ET, {left} min left", True
-    return (f"The {limit}-minute submit window closed at {at} ET. Use Post again under Post a clip again for a fresh "
-            "post, then submit that one straight away."), False
+    return f"Too late to submit: the {limit}-minute window closed at {at} ET.", False
 
 
-def _submissions(pending: list[dict], settings: Settings) -> str:
-    """The posted links still to be submitted to their campaign, each with its deadline and buttons."""
+def _submissions(pending: list[dict], settings: Settings, conn=None) -> str:
+    """The posted links still to be submitted to their campaign, each with its deadline and buttons: Submitted
+    while the window is open; Post again and Remove once it has closed."""
     e = html.escape
     camps = campaigns.by_id(campaigns.load(settings.data_dir))
+    again = {c["id"]: c["platforms"] for c in pipeline.repostable(conn)} if conn is not None else {}
     cards = []
     for p in pending:
         camp = camps.get(p["campaign_id"])
@@ -488,9 +481,20 @@ def _submissions(pending: list[dict], settings: Settings) -> str:
             f'{e(PLATFORM_NAMES.get(p["platform"], p["platform"]))}</div>{when}'
             f'<div class="row" style="margin-top:6px"><input type="text" id="link-{p["id"]}" readonly value="{e(p["url"])}" '
             f'style="flex:1 1 200px"><button type="button" onclick="copyText(\'link-{p["id"]}\', this)">Copy link</button></div>'
-            f'<div class="row" style="margin-top:6px">{page}'
-            f'<form class="inline" method="post" action="/submitted/one"><input type="hidden" name="id" value="{p["id"]}">'
-            f'<input type="hidden" name="back" value="/#links"><button>Mark submitted</button></form></div></div>')
+            + (f'<div class="row" style="margin-top:6px">{page}'
+               f'<form class="inline" method="post" action="/submitted/one"><input type="hidden" name="id" value="{p["id"]}">'
+               f'<input type="hidden" name="back" value="/#links"><button class="primary">Submitted &#10003;</button></form></div>'
+               if open_ else
+               '<div class="row" style="margin-top:6px">'
+               + (f'<form class="inline" method="post" action="/repost" onsubmit="return confirm({_again_question(p["platform"])})">'
+                  f'<input type="hidden" name="id" value="{p["clip_id"]}"><input type="hidden" name="platform" '
+                  f'value="{e(p["platform"])}"><button class="primary">Post again on '
+                  f'{e(PLATFORM_NAMES.get(p["platform"], p["platform"]))}</button></form>'
+                  if p["platform"] in again.get(p["clip_id"], []) else "")
+               + f'<form class="inline" method="post" action="/submitted/one"><input type="hidden" name="id" value="{p["id"]}">'
+                 f'<input type="hidden" name="back" value="/#links"><button>Remove</button></form></div>'
+                 '<div class="muted" style="font-size:13px">Remove only takes it off this list; the post stays up.</div>')
+            + '</div>')
     return "".join(cards) + COPY_JS
 
 
@@ -525,6 +529,30 @@ def _checklist_html(campaign) -> str:
             + "".join(f'<label><input type="checkbox"> {html.escape(i)}</label>' for i in items) + '</div>')
 
 
+def _clip_needs(c: dict) -> str:
+    """One line saying what a clip is waiting for."""
+    if c["state"] == "waiting":
+        return '<b class="bad">Needs your approval</b>'
+    if c["state"] == "approved":
+        parts = []
+        for p in c["posts"]:
+            name = PLATFORM_NAMES.get(p["platform"], p["platform"])
+            if p["status"] == "ready":
+                parts.append(f"<b>Post it on {name}</b>")
+            elif p["status"] == "queued":
+                when = post_time_label(p["scheduled_at"])
+                parts.append(f"{name} posts {'within 5 minutes' if when == 'now' else 'at ' + html.escape(when)}")
+        return " &middot; ".join(parts) or "Approved"
+    done = sorted({PLATFORM_NAMES.get(p["platform"], p["platform"]) for p in c["posts"] if p["status"] == "posted"})
+    return '<span class="good">Posted</span> on ' + ", ".join(done)
+
+
+def _hide_form(clip_id: int) -> str:
+    return (f'<form class="inline" method="post" action="/clip/hide" onsubmit="return confirm(\'Take this clip off the list? '
+            f'Its posts stay up.\')"><input type="hidden" name="id" value="{clip_id}"><input type="hidden" name="back" '
+            f'value="/#clips"><button>Remove from list</button></form>')
+
+
 def _clip_meta(c: dict) -> str:
     return f'{c["seconds"]:.0f}s &middot; {STATE_LABELS[c["state"]]}'
 
@@ -543,15 +571,55 @@ def _library(conn, settings: Settings) -> str:
     blocks = []
     for campaign_id, items in groups.items():
         rows = "".join(
-            f'<div class="card"><b>{e(c["title"])}</b><div class="muted">{_clip_meta(c)}</div>'
-            f'<div class="row" style="margin-top:6px"><a class="button" href="/clip/{c["id"]}">Open</a></div></div>'
+            f'<div class="card"><b>{e(c["title"])}</b><div class="muted">{c["seconds"]:.0f}s &middot; {_clip_needs(c)}</div>'
+            f'<div class="row" style="margin-top:6px"><a class="button primary" href="/clip/{c["id"]}">Open</a>'
+            + (_delete_form(c["id"], back="/#clips") if c["state"] in ("waiting", "approved") else _hide_form(c["id"]))
+            + '</div></div>'
             for c in items)
         blocks.append(f'<details open><summary>{e(names.get(campaign_id, campaign_id or "Other clips"))} '
                       f'({len(items)})</summary>{rows}</details>')
     working = ('<p class="muted"><b>Making clips now.</b> New ones appear here in a few minutes; this page refreshes by '
                'itself.</p>' if running else "")
-    return ('<section id="clips"><h2>Your clips</h2><p class="muted">Tap Open on a clip to watch it and then approve it, '
-            f'reject it, delete it or download it.</p>{working}{"".join(blocks)}</section>')
+    return ('<section id="clips"><h2>Your clips</h2><p class="muted">Tap Open to watch a clip and do everything for it: '
+            'approve, download, copy the caption, save the post link, set the YouTube time.</p>'
+            f'{working}{"".join(blocks)}</section>')
+
+
+def _posting_tools(c: dict, camp) -> str:
+    """On a clip's page: the caption and a link box for each app you post to by hand, and the time box for
+    each automatic (YouTube) post."""
+    e = html.escape
+    ready = [p for p in c["posts"] if p["status"] == "ready"]
+    queued = [p for p in c["posts"] if p["status"] == "queued"]
+    if not ready and not queued:
+        return ""
+    out = []
+    back = f'<input type="hidden" name="back" value="/clip/{c["id"]}">'
+    if ready and c["has_video"]:
+        out.append(f'<div class="row"><a class="button primary" href="/media/{e(c["media_token"] or "")}.mp4?download=1" '
+                   f'download="clip-{c["id"]}.mp4">1. Download the video</a></div>')
+    if ready:
+        out.append(f'<label>Caption</label><textarea id="caption-{c["id"]}" readonly>{e(c["description"])}</textarea>'
+                   f'<div class="row"><button type="button" onclick="copyText(\'caption-{c["id"]}\', this)">Copy caption</button></div>')
+    for p in ready:
+        name = PLATFORM_NAMES.get(p["platform"], p["platform"])
+        out.append(
+            f'<div class="card"><b>Post it on {e(name)}</b><div class="muted">{e(app_tip(p["platform"], camp))}</div>'
+            f'<form method="post" action="/manual/save" class="row" style="margin-top:6px"><input type="hidden" name="id" '
+            f'value="{p["id"]}">{back}<input type="url" name="url" required placeholder="Paste your {e(name)} post link" '
+            f'style="flex:1 1 200px"><button class="primary">Save link</button></form>'
+            f'<form method="post" action="/manual/skip" style="margin-top:6px"><input type="hidden" name="id" value="{p["id"]}">'
+            f'{back}<button>Not posting on {e(name)}</button></form></div>')
+    for p in queued:
+        name = PLATFORM_NAMES.get(p["platform"], p["platform"])
+        out.append(
+            f'<div class="card"><b>{e(name)} posts it by itself</b>'
+            f'<form method="post" action="/post/schedule" style="margin-top:6px"><input type="hidden" name="id" value="{p["id"]}">'
+            f'{back}<label>Posts at <small>(Eastern time)</small></label><div class="row">{_time_box("at", p["scheduled_at"])}'
+            f'<button class="primary">Set time</button></div></form>'
+            f'<form method="post" action="/post/now" style="margin-top:6px"><input type="hidden" name="id" value="{p["id"]}">'
+            f'{back}<button>Post now</button></form></div>')
+    return '<section><h2>Post it</h2>' + "".join(out) + '</section>'
 
 
 def _clip_page(conn, settings: Settings, clip_id: int) -> str | None:
@@ -592,8 +660,9 @@ def _clip_page(conn, settings: Settings, clip_id: int) -> str | None:
                        f'<input type="hidden" name="back" value="/#clips"><button>Reject</button></form>')
     if c["state"] in ("waiting", "approved"):
         actions.append(_delete_form(c["id"], back="/#clips"))
-    if c["state"] == "approved":
-        actions.append('<a class="button" href="/#ready">Go to Ready to post</a>')
+    posting = _posting_tools(c, camp)
+    if c["state"] == "posted":
+        actions.append(_hide_form(c["id"]))
     if c["state"] == "posted" and c["has_video"]:
         again = next((x for x in pipeline.repostable(conn) if x["id"] == c["id"]), None)
         for p in (again or {}).get("platforms", []):
@@ -611,8 +680,9 @@ def _clip_page(conn, settings: Settings, clip_id: int) -> str | None:
         f'<section>{video}</section>'
         f'<section><h2>Caption</h2><div style="white-space:pre-wrap">{e(c["description"])}</div></section>'
         f'<section><h2>Where it goes</h2><ul>{"".join(where)}</ul></section>'
-        + (f'<section>{_checklist_html(camp)}</section>' if camp and c["state"] in ("waiting", "approved") else "") +
-        f'<section><h2>What do you want to do?</h2><div class="row">{"".join(actions)}</div></section>')))
+        + (f'<section>{_checklist_html(camp)}</section>' if camp and c["state"] in ("waiting", "approved") else "")
+        + posting +
+        f'<section><h2>What do you want to do?</h2><div class="row">{"".join(actions)}</div></section>' + COPY_JS)))
 
 
 def _review(conn, settings: Settings) -> str:
@@ -939,7 +1009,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
         "SELECT COALESCE(SUM(views), 0) AS views, SUM(status = 'posted') AS posted, SUM(status = 'queued') AS queued"
         " FROM posts").fetchone()
     pending = pipeline.pending_submissions(conn)
-    pending_html = _label_todo(conn) + (_submissions(pending, settings) if pending else '<p class="muted">Nothing waiting.</p>')
+    pending_html = _label_todo(conn) + (_submissions(pending, settings, conn) if pending else '<p class="muted">Nothing waiting.</p>')
     if len(pending) > 1:
         pending_html += '<form method="post" action="/submitted" style="margin-top:10px"><button>Mark all submitted</button></form>'
     clips = conn.execute(
@@ -1305,8 +1375,13 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                         return self._page(error=str(exc))
                     pipeline.reschedule(conn, int(form.get("id", ["0"])[0] or 0), when)
                     label = post_time_label(when)
+                    back = form.get("back", [""])[0]
+                    if back.startswith("/clip/") and SAFE_BACK_RE.match(back):
+                        return self._redirect(back)  # set from a clip's page: stay on it
                     return self._redirect("/?" + urlencode({"notice": (
-                        "It will post within 5 minutes." if label == "now" else f"It will post at {label}.")}) + "#scheduled")
+                        "It will post within 5 minutes." if label == "now" else f"It will post at {label}.")}) + "#clips")
+                elif self.path == "/clip/hide":
+                    pipeline.hide_clip(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/clip/delete-video":
                     pipeline.delete_clip_video(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/clip/delete":
@@ -1344,9 +1419,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                         status = pipeline.repost(conn, int(form.get("id", ["0"])[0] or 0), form.get("platform", [""])[0])
                     except ValueError as exc:
                         return self._page(error=str(exc))
-                    return self._redirect("/?" + urlencode({"notice": (
-                        "Added under Ready to post: download it, post it, and submit the link quickly." if status == "ready"
-                        else "It will be posted within 5 minutes.")}) + ("#ready" if status == "ready" else ""))
+                    return self._redirect(f"/clip/{int(form.get('id', ['0'])[0] or 0)}")  # its page has what you need next
                 elif self.path == "/post/now":
                     pipeline.post_now(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/review/approve-all":

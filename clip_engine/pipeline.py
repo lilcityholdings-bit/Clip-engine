@@ -494,11 +494,22 @@ def _clip_info(conn: sqlite3.Connection, c) -> dict | None:
     return {**dict(c), "posts": posts, "state": state, "has_video": bool(path and path.exists())}
 
 
+HIDDEN_KEY = "hidden_clips"
+
+
+def hide_clip(conn: sqlite3.Connection, clip_id: int) -> None:
+    """Take a clip off the Your clips list. Its posts stay up and keep being tracked."""
+    hidden = set(json.loads(db.get(conn, HIDDEN_KEY, "[]")))
+    hidden.add(int(clip_id))
+    db.put(conn, HIDDEN_KEY, json.dumps(sorted(hidden)[-500:]))
+
+
 def clip_library(conn: sqlite3.Connection, days: int = 14) -> list[dict]:
     """Every recent clip you can still act on or look back at, newest first, for the Your clips section."""
+    hidden = set(json.loads(db.get(conn, HIDDEN_KEY, "[]")))
     rows = conn.execute(f"SELECT {CLIP_COLUMNS} FROM clips c WHERE c.created_at >= datetime('now', ?) ORDER BY c.id DESC",
                         (f"-{days} days",)).fetchall()
-    return [info for info in (_clip_info(conn, r) for r in rows) if info]
+    return [info for info in (_clip_info(conn, r) for r in rows if r["id"] not in hidden) if info]
 
 
 def clip_detail(conn: sqlite3.Connection, clip_id: int) -> dict | None:

@@ -83,7 +83,7 @@ def test_dashboard_card_appears_only_with_a_live_campaign(server, tmp_path):
     assert 'id="own-video"' not in _get(base + "/", "s3cret").read().decode()
     _campaign(tmp_path)
     page = _get(base + "/", "s3cret").read().decode()
-    assert 'id="own-video"' in page and "Upload videos or photos from this phone" in page and "Pod Show" in page
+    assert 'id="own-video"' in page and "Add a video" in page and "Pod Show" in page
 
 
 def test_dashboard_upload_and_link_routes(server, tmp_path, monkeypatch):
@@ -807,7 +807,7 @@ def test_post_again_section_and_route(server, tmp_path, monkeypatch):
     page = _get(base + "/", "s3cret").read().decode()
     assert "Post a clip again" in page and "Post again on TikTok" in page and "30 minutes" in page
     page = _get(base + "/repost", "s3cret", data=f"id={cid}&platform=tiktok".encode()).read().decode()
-    assert "Added under Ready to post" in page and "Ready to post from your phone" in page
+    assert "Post it on TikTok" in page and "Paste your TikTok post link" in page  # it lands on the clip's own page
     bad = _get(base + "/repost", "s3cret", data=f"id={cid}&platform=tiktok".encode()).read().decode()
     assert "be posted again" in bad
 
@@ -1136,7 +1136,7 @@ def test_clip_cards_have_download_and_delete_buttons(server, tmp_path):
     soon = (datetime.now(ZoneInfo("America/New_York")) + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M")
     _get(base + "/review/approve", "s3cret", data=f"id={cid}&choose=1&platforms=youtube&platforms=tiktok&at={soon}".encode())
     page = _get(base + "/", "s3cret").read().decode()
-    assert page.count("/clip/delete") == 2  # one under Ready to post, one under Posting automatically
+    assert page.count('action="/clip/delete"') == 3  # on its Your clips card, under Ready to post and under Posting automatically
     assert page.count(f'download="clip-{cid}.mp4"') >= 2
     _get(base + "/clip/delete", "s3cret", data=f"id={cid}".encode())
     assert {r[0] for r in conn.execute("SELECT status FROM posts")} == {"rejected"} and not f.exists()
@@ -1155,7 +1155,7 @@ def test_every_clip_list_has_a_delete(server, tmp_path):
     conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'tiktok', 'review', datetime('now'))", (cid,))
     conn.commit()
     page = _get(base + "/", "s3cret").read().decode()
-    assert "Reject" in page and page.count("/clip/delete") == 1  # the approval card has both Reject and Delete
+    assert "Reject" in page and page.count('action="/clip/delete"') == 2  # its Your clips card and its approval card
     posted_id, posted_file = _posted_clip(conn, tmp_path)  # a posted clip kept for reposting
     page = _get(base + "/", "s3cret").read().decode()
     assert "Delete video" in page and "/clip/delete-video" in page
@@ -1355,7 +1355,7 @@ def test_submit_deadline_and_its_label():
     label, ok = dashboard.deadline_label({"posted_at": "2026-11-17 19:15:00"}, camp, now)
     assert ok and label == "Submit by 2:45pm ET, 25 min left"
     label, ok = dashboard.deadline_label({"posted_at": "2026-11-17 18:00:00"}, camp, now)
-    assert not ok and "closed at 1:30pm ET" in label and "Post again" in label
+    assert not ok and label == "Too late to submit: the 30-minute window closed at 1:30pm ET."
     assert dashboard.deadline_label({"posted_at": "2026-11-17 18:00:00"}, None, now) == ("", True)
 
 
@@ -1421,8 +1421,9 @@ def test_phone_layout_puts_everyday_things_first_and_the_rest_under_more(server,
     _campaign(tmp_path)
     page = _get(base + "/", "s3cret").read().decode()
     more = page.index('<details id="more"')
-    assert page.index("Make clips now") < more and page.index('id="links"') < more and page.index('id="campaigns"') < more
-    assert page.index('id="settings"') > more and page.index("Trending now") > more and page.index("estimated earnings") > more
+    assert page.index("Make clips now") < page.index('id="own-video"') < page.index('id="links"') < more
+    for folded in ('id="campaigns"', 'id="settings"', "Trending now", "estimated earnings"):
+        assert page.index(folded) > more, folded
     assert "openFor(location.hash)" in page  # the Settings shortcut opens the More box
 
 
@@ -1498,3 +1499,75 @@ def test_cleanup_runs_once_a_day_and_never_during_a_clip_run(tmp_path, monkeypat
     monkeypatch.setattr(main_mod, "producing", lambda: True)
     main_mod.tick(conn, settings, {})
     assert calls == [1]  # not while clips are being made
+
+
+# --- simpler: one place per clip, delete or remove everything --------------------------------------------------
+
+def test_posted_clips_can_be_taken_off_the_list_without_touching_the_post(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    cid, f = _posted_clip(conn, tmp_path)
+    page = _get(base + "/", "s3cret").read().decode()
+    assert f'href="/clip/{cid}"' in page and "Remove from list" in page and "Posted" in page
+    _get(base + "/clip/hide", "s3cret", data=f"id={cid}&back=/%23clips".encode())
+    assert f'href="/clip/{cid}"' not in _get(base + "/", "s3cret").read().decode()
+    assert conn.execute("SELECT status FROM posts WHERE clip_id = ?", (cid,)).fetchone()[0] == "posted" and f.exists()
+
+
+def test_expired_links_offer_post_again_and_remove_instead_of_mark_submitted(server, tmp_path):
+    base, conn = server
+    _strict(tmp_path)
+    f = tmp_path / "late.mp4"
+    f.write_bytes(b"v")
+    cid = conn.execute("INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms,"
+                       " file_path, media_token) VALUES ('s', 'sega', 0, 20, 'Late clip', 'd', '[]', '{}', ?, ?)",
+                       (str(f), "l" * 32)).lastrowid
+    late = conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at, url, posted_at) VALUES (?, 'tiktok',"
+                        " 'posted', datetime('now'), 'https://tiktok.com/t/late', datetime('now', '-2 hours'))", (cid,)).lastrowid
+    conn.commit()
+    links = _get(base + "/", "s3cret").read().decode().split('id="links"')[1].split("</section>")[0]
+    assert "Too late to submit" in links and "Post again on TikTok" in links and ">Remove<" in links
+    assert "Submitted &#10003;" not in links and "Mark submitted" not in links
+    _get(base + "/submitted/one", "s3cret", data=f"id={late}&back=/%23links".encode())
+    assert pipeline.pending_submissions(conn) == []  # removed from the list
+    page = _get(base + "/repost", "s3cret", data=f"id={cid}&platform=tiktok".encode()).read().decode()
+    assert "Post it on TikTok" in page  # Post again lands on the clip's page, ready to post
+
+
+def test_a_clips_page_has_everything_needed_to_post_it(server, tmp_path):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    base, conn = server
+    _strict(tmp_path)
+    db.put(conn, "auto_platforms", "youtube")
+    f = tmp_path / "clips" / ("p" * 32 + ".mp4")
+    f.parent.mkdir(exist_ok=True)
+    f.write_bytes(b"v")
+    cid = conn.execute("INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags, arms,"
+                       " file_path, media_token) VALUES ('s', 'sega', 0, 20, 'Clip', 'Heismay in the city\n#Ad', '[]', '{}', ?, ?)",
+                       (str(f), "p" * 32)).lastrowid
+    tiktok = conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'tiktok', 'ready', datetime('now'))",
+                          (cid,)).lastrowid
+    yt = conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (?, 'youtube', 'queued',"
+                      " datetime('now', '+3 hours'))", (cid,)).lastrowid
+    conn.commit()
+    page = _get(f"{base}/clip/{cid}", "s3cret").read().decode()
+    assert "Copy caption" in page and "Paste your TikTok post link" in page and "Not posting on TikTok" in page
+    assert "YouTube posts it by itself" in page and "Set time" in page and "Post now" in page and "Before you post" in page
+    soon = (datetime.now(ZoneInfo("America/New_York")) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M")
+    after = _get(base + "/post/schedule", "s3cret", data=f"id={yt}&at={soon}&back=/clip/{cid}".encode()).read().decode()
+    assert "YouTube posts it by itself" in after  # setting the time keeps you on the clip's page
+    _get(base + "/manual/skip", "s3cret", data=f"id={tiktok}&back=/clip/{cid}".encode())
+    assert conn.execute("SELECT status FROM posts WHERE id = ?", (tiktok,)).fetchone()[0] == "skipped"
+
+
+def test_the_main_page_is_short_upload_then_clips_then_links(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    page = _get(base + "/", "s3cret").read().decode()
+    form = page.split('id="own-video"')[1].split("</section>")[0]
+    visible = form.split("<details")[0]  # what shows before More options is opened
+    assert "Campaign" in visible and 'type="file"' in visible and "How many clips do you want?" in visible
+    assert "Upload</button>" in form.split("</details>")[1]  # the Upload button is outside More options
+    assert "Creator" not in visible and "Combine" not in visible  # tucked under More options
+    assert "More options" in form
