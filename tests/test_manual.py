@@ -1645,6 +1645,8 @@ def test_clip_status_page_lists_every_clip_in_order_with_each_app_status(server,
     assert "Clip status" in page and "Back to the dashboard" in page
     assert page.index("Newest clip") < page.index(f"clip/{old}") or page.index("Newest clip") < page.index("made")  # newest first
     assert "YouTube</b>: scheduled for" in page and "waiting for your approval" in page
+    scheduled = page.split("scheduled for ")[1][:30]
+    assert scheduled.split(" ET")[0].count(",") == 1 and "ET" in scheduled  # a date like "Nov 18, 1:05pm ET", not a weekday
     assert "TikTok</b>: posted on Nov 18, 4:15am ET" in page and "36 views" in page  # posted time in Eastern, and views
     assert "UTC" not in page  # no UTC left on the page
     assert "Clip status" in _get(base + "/", "s3cret").read().decode()  # the button is on the main page
@@ -1657,3 +1659,5 @@ def test_status_times_are_eastern():
     assert dashboard.et_text("2026-11-18 09:15:00") == "Nov 18, 4:15am ET"  # 9:15 UTC is 4:15am Eastern in November
     assert dashboard.et_text("2026-11-18 17:05:00") == "Nov 18, 12:05pm ET"
     assert dashboard.et_text(None) == ""
+    assert dashboard.et_text("2026-07-04 18:05:00") == "Jul 4, 2:05pm ET"  # July is daylight time, one hour different
+    assert dashboard.et_text("2026-11-18 05:00:00") == "Nov 18, 12:00am ET"  # midnight reads as 12:00am, not 0:00

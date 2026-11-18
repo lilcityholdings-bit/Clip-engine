@@ -792,7 +792,7 @@ def status_page(conn, settings: Settings) -> str:
             if p["status"] == "posted" and p["posted_at"]:
                 when = f' on {e(et_text(p["posted_at"]))}'
             elif p["status"] == "queued" and p["scheduled_at"]:
-                when = f' for {e(post_time_label(p["scheduled_at"]))}'
+                when = f' for {e(et_text(p["scheduled_at"]))}'  # the same date format as the rest of the page
             views = f' &middot; {p["views"]:,} views' if p["status"] == "posted" and p["views"] is not None else ""
             link = f' &middot; {_link(p["url"], "open")}' if p["url"] else ""
             lines.append(f'<li><b>{e(name)}</b>: {e(label)}{when}{views}{link}</li>')
