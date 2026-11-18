@@ -130,6 +130,7 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 <section><div class="row">
 <form method="post" action="/{toggle}"><button class="primary">{toggle_label}</button></form>
 <form method="post" action="/run"><button>Make clips now</button></form>
+<a class="button" href="/status">Clip status</a>
 </div>{status}</section>
 {own_video}
 {library}
@@ -160,6 +161,9 @@ document.querySelectorAll('a[href^="#"]').forEach(function (a) {{ a.addEventList
 openFor(location.hash);
 </script>
 </main></body></html>"""
+
+_CSS = PAGE.split("<style>", 1)[1].split("</style>", 1)[0].replace("{{", "{").replace("}}", "}")
+
 
 CLIP_PAGE = ("""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title><style>"""
@@ -758,6 +762,46 @@ def _posting_tools(c: dict, camp) -> str:
     return '<section><h2>Post it</h2>' + "".join(out) + '</section>'
 
 
+def status_page(conn, settings: Settings) -> str:
+    """Every clip in order, newest first: when it was made, and for each app its status, when it was posted and its
+    views. Reads the same data the rest of the dashboard uses; nothing here changes anything."""
+    e = html.escape
+    names = {c.id: c.name for c in campaigns.load(settings.data_dir)}
+    rows = conn.execute(
+        "SELECT c.id, c.title, c.campaign_id, c.created_at FROM clips c ORDER BY c.id DESC LIMIT 200").fetchall()
+    out = []
+    for c in rows:
+        posts = conn.execute(
+            "SELECT platform, status, scheduled_at, posted_at, views, url FROM posts WHERE clip_id = ? ORDER BY platform",
+            (c["id"],)).fetchall()
+        lines = []
+        for p in posts:
+            name = PLATFORM_NAMES.get(p["platform"], p["platform"])
+            label = {"review": "waiting for your approval", "ready": "ready to post by hand",
+                     "queued": "scheduled", "posted": "posted", "rejected": "removed", "expired": "expired",
+                     "skipped": "skipped", "failed": "failed"}.get(p["status"], p["status"])
+            when = ""
+            if p["status"] == "posted" and p["posted_at"]:
+                when = f' on {e(p["posted_at"][:16])} UTC'
+            elif p["status"] == "queued" and p["scheduled_at"]:
+                when = f' for {e(post_time_label(p["scheduled_at"]))}'
+            views = f' &middot; {p["views"]:,} views' if p["status"] == "posted" and p["views"] is not None else ""
+            link = f' &middot; {_link(p["url"], "open")}' if p["url"] else ""
+            lines.append(f'<li><b>{e(name)}</b>: {e(label)}{when}{views}{link}</li>')
+        out.append(
+            f'<div class="card"><b>{e(c["title"])}</b>'
+            f'<div class="muted">{e(names.get(c["campaign_id"], c["campaign_id"] or ""))} &middot; made '
+            f'{e(c["created_at"][:16])} UTC</div>'
+            f'<ul style="margin:6px 0 0 18px;padding:0">{"".join(lines) or "<li>no posts yet</li>"}</ul>'
+            f'<div class="row" style="margin-top:6px"><a class="button" href="/clip/{c["id"]}">Open</a></div></div>')
+    body = "".join(out) or '<p class="muted">No clips yet.</p>'
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
+            f'content="width=device-width, initial-scale=1"><title>Clip status</title><style>{_CSS}</style></head><body><main>'
+            f'<p><a href="/">&larr; Back to the dashboard</a></p><h1>Clip status</h1>'
+            f'<p class="muted">Every clip, newest first. Times are UTC. Open a clip to act on it.</p>{body}'
+            f'</main></body></html>')
+
+
 def _clip_page(conn, settings: Settings, clip_id: int) -> str | None:
     """The page of one clip: the video, its caption, where it goes, and what you can do with it."""
     c = pipeline.clip_detail(conn, clip_id)
@@ -1307,6 +1351,14 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                 if not path.exists():
                     return self._send(404, b"not found", "text/plain")
                 return self._send_video(path, download="download=1" in url.query)
+            if url.path == "/status":
+                if not self._authorized():
+                    return self._deny()
+                conn = db.connect(settings.db_path)
+                try:
+                    return self._send(200, status_page(conn, settings).encode())
+                finally:
+                    conn.close()
             clip = CLIP_RE.match(url.path)
             if clip:
                 if not self._authorized():

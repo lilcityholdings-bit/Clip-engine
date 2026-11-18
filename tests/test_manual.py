@@ -1627,3 +1627,26 @@ def test_do_this_next_buttons_work_end_to_end(server, tmp_path):
     assert "Submit your TikTok link now" in page  # saving the link moves straight on to submitting it
     page = _get(base + "/submitted/one", "s3cret", data=f"id={pid}&back=/".encode()).read().decode()
     assert "All done" in page
+
+
+# --- Clip status: every clip in order, with each app's status and times ----------------------------------------
+
+def test_clip_status_page_lists_every_clip_in_order_with_each_app_status(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    old, _ = _posted_clip(conn, tmp_path, platforms=("tiktok",))
+    conn.execute("UPDATE posts SET posted_at = '2026-11-18 09:15:00', views = 36 WHERE clip_id = ?", (old,))
+    conn.commit()
+    new = _clip_row(conn, tmp_path, "pod", "Newest clip", "review", "s" * 32)
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at, url, posted_at, views) VALUES"
+                 " (?, 'youtube', 'queued', datetime('now', '+3 hours'), NULL, NULL, NULL)", (new,))
+    conn.commit()
+    page = _get(base + "/status", "s3cret").read().decode()
+    assert "Clip status" in page and "Back to the dashboard" in page
+    assert page.index("Newest clip") < page.index(f"clip/{old}") or page.index("Newest clip") < page.index("made")  # newest first
+    assert "YouTube</b>: scheduled for" in page and "waiting for your approval" in page
+    assert "TikTok</b>: posted on" in page and "views" in page  # posted time and views
+    assert "Clip status" in _get(base + "/", "s3cret").read().decode()  # the button is on the main page
+    with pytest.raises(urllib.error.HTTPError) as err:
+        _get(base + "/status", None)
+    assert err.value.code == 401  # still needs the password
