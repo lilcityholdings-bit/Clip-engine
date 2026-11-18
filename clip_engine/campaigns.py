@@ -63,7 +63,7 @@ class Campaign:
     trim_end: float = 0.0    # seconds cut from the end of every source video (logos, end cards)
     submit_within_minutes: int = 0  # the program only accepts a link submitted this soon after posting (0: no limit)
     keep_live_days: int = 0         # posts must stay up this long (0: not stated)
-    disclosure_line: str = ""  # e.g. "#Ad": the caption is the text, then this alone on the next line, then at most 3 hashtags
+    disclosure_line: str = ""  # e.g. "#Ad": the caption is the text, then this alone on the next line, then at most 2 hashtags
     active: bool = True
     ends_on: str | None = None
 
@@ -163,7 +163,7 @@ def _disclosure(value: str) -> str:
     return value
 
 
-def disclosed_caption(text: str, hashtags: list[str], disclosure: str, limit: int = 3) -> str:
+def disclosed_caption(text: str, hashtags: list[str], disclosure: str, limit: int = 2) -> str:
     """The campaign's layout: the caption text, then the disclosure hashtag on its own line right after it,
     then (on the next line) up to `limit` more hashtags. The text carries no hashtags of its own, so the
     disclosure is the first hashtag."""

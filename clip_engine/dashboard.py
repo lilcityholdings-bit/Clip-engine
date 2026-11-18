@@ -551,7 +551,7 @@ def _campaign_form(values: dict | None, editing: bool, open_form: bool) -> str:
 <textarea name="sources" placeholder="https://www.youtube.com/@creator/videos">{e(sources)}</textarea>
 <label>Approved captions <small>only if the campaign supplies them: one per line. The engine uses one exactly as written and adds nothing else (no hashtags, links, credit lines or on-screen text)</small></label>
 <textarea name="approved_captions" placeholder="first look at the new drone @brand #ad">{e(captions)}</textarea>
-<label>Disclosure on its own line <small>only if the campaign says the #Ad must sit alone on the line right after the caption, as the first hashtag; type it here, e.g. #Ad. The engine then writes: caption, that line, then at most 3 related hashtags, with no credit or other lines</small></label>
+<label>Disclosure on its own line <small>only if the campaign says the #Ad must sit alone on the line right after the caption, as the first hashtag; type it here, e.g. #Ad. The engine then writes: caption, that line, then at most 2 related hashtags, with no credit or other lines</small></label>
 <input type="text" name="disclosure_line" placeholder="#Ad" value="{val("disclosure_line")}">
 <label>Required in every caption <small>tags or @mentions the campaign asks for</small></label>
 <input type="text" name="caption_required" placeholder="@creator #creatorclips" value="{val("caption_required")}">

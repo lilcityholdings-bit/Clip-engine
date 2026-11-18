@@ -556,7 +556,7 @@ def test_thumbnail_of_a_real_photo_and_video(tmp_path):
 
 def test_disclosed_caption_layout_and_form_field():
     cap = campaigns.disclosed_caption("Heismay in action #Fun @sega  now", ["#Ad", "#gaming", "#jrpg", "#sega", "#extra"], "#Ad")
-    assert cap == "Heismay in action now\n#Ad\n#gaming #jrpg #sega"  # #Ad alone and first; at most 3 more; text has no tags
+    assert cap == "Heismay in action now\n#Ad\n#gaming #jrpg"  # #Ad alone and first; at most 2 more; text has no tags
     assert campaigns.disclosed_caption("Just text", [], "#Ad") == "Just text\n#Ad"
     form = {"name": "Sega", "program_url": "https://w", "rate": "1", "disclosure_line": " #Ad "}
     assert campaigns.from_form(form, ["tiktok"]).disclosure_line == "#Ad"
