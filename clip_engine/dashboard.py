@@ -762,6 +762,14 @@ def _posting_tools(c: dict, camp) -> str:
     return '<section><h2>Post it</h2>' + "".join(out) + '</section>'
 
 
+def et_text(utc_text: str | None) -> str:
+    """A UTC timestamp from the database as Eastern time, e.g. "Nov 18, 9:15am ET"."""
+    if not utc_text:
+        return ""
+    when = datetime.fromisoformat(utc_text).replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/New_York"))
+    return when.strftime("%b %-d, %-I:%M%p").replace("AM", "am").replace("PM", "pm") + " ET"
+
+
 def status_page(conn, settings: Settings) -> str:
     """Every clip in order, newest first: when it was made, and for each app its status, when it was posted and its
     views. Reads the same data the rest of the dashboard uses; nothing here changes anything."""
@@ -782,7 +790,7 @@ def status_page(conn, settings: Settings) -> str:
                      "skipped": "skipped", "failed": "failed"}.get(p["status"], p["status"])
             when = ""
             if p["status"] == "posted" and p["posted_at"]:
-                when = f' on {e(p["posted_at"][:16])} UTC'
+                when = f' on {e(et_text(p["posted_at"]))}'
             elif p["status"] == "queued" and p["scheduled_at"]:
                 when = f' for {e(post_time_label(p["scheduled_at"]))}'
             views = f' &middot; {p["views"]:,} views' if p["status"] == "posted" and p["views"] is not None else ""
@@ -791,14 +799,14 @@ def status_page(conn, settings: Settings) -> str:
         out.append(
             f'<div class="card"><b>{e(c["title"])}</b>'
             f'<div class="muted">{e(names.get(c["campaign_id"], c["campaign_id"] or ""))} &middot; made '
-            f'{e(c["created_at"][:16])} UTC</div>'
+            f'{e(et_text(c["created_at"]))}</div>'
             f'<ul style="margin:6px 0 0 18px;padding:0">{"".join(lines) or "<li>no posts yet</li>"}</ul>'
             f'<div class="row" style="margin-top:6px"><a class="button" href="/clip/{c["id"]}">Open</a></div></div>')
     body = "".join(out) or '<p class="muted">No clips yet.</p>'
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
             f'content="width=device-width, initial-scale=1"><title>Clip status</title><style>{_CSS}</style></head><body><main>'
             f'<p><a href="/">&larr; Back to the dashboard</a></p><h1>Clip status</h1>'
-            f'<p class="muted">Every clip, newest first. Times are UTC. Open a clip to act on it.</p>{body}'
+            f'<p class="muted">Every clip, newest first. Times are Eastern. Open a clip to act on it.</p>{body}'
             f'</main></body></html>')
 
 

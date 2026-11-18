@@ -1645,8 +1645,15 @@ def test_clip_status_page_lists_every_clip_in_order_with_each_app_status(server,
     assert "Clip status" in page and "Back to the dashboard" in page
     assert page.index("Newest clip") < page.index(f"clip/{old}") or page.index("Newest clip") < page.index("made")  # newest first
     assert "YouTube</b>: scheduled for" in page and "waiting for your approval" in page
-    assert "TikTok</b>: posted on" in page and "views" in page  # posted time and views
+    assert "TikTok</b>: posted on Nov 18, 4:15am ET" in page and "36 views" in page  # posted time in Eastern, and views
+    assert "UTC" not in page  # no UTC left on the page
     assert "Clip status" in _get(base + "/", "s3cret").read().decode()  # the button is on the main page
     with pytest.raises(urllib.error.HTTPError) as err:
         _get(base + "/status", None)
     assert err.value.code == 401  # still needs the password
+
+
+def test_status_times_are_eastern():
+    assert dashboard.et_text("2026-11-18 09:15:00") == "Nov 18, 4:15am ET"  # 9:15 UTC is 4:15am Eastern in November
+    assert dashboard.et_text("2026-11-18 17:05:00") == "Nov 18, 12:05pm ET"
+    assert dashboard.et_text(None) == ""
