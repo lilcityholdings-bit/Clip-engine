@@ -189,6 +189,21 @@ class YouTube:
         applied = self.last_privacy
         return {"video_id": video_id, "requested": "unlisted", "applied": applied, "locked": applied == "private"}
 
+    def retention(self, video_ids: list[str], since: date) -> dict[str, float]:
+        """Average percent of each video that viewers watched (YouTube Analytics lags about two days)."""
+        if not video_ids:
+            return {}
+        resp = self.analytics.reports().query(
+            ids="channel==MINE",
+            startDate=since.isoformat(),
+            endDate=(date.today() + timedelta(days=1)).isoformat(),
+            metrics="views,averageViewPercentage",
+            dimensions="video",
+            filters="video==" + ",".join(video_ids[:200]),
+            maxResults=200,
+        ).execute()
+        return {vid: round(float(pct), 1) for vid, _views, pct in resp.get("rows", [])}
+
     def performance(self, video_ids: list[str], since: date) -> dict[str, tuple[int, int]]:
         """views and subscribersGained per video since a date."""
         if not video_ids:

@@ -1018,6 +1018,13 @@ def refresh_views(conn: sqlite3.Connection, publishers: dict, days: int = 30) ->
             continue
         for p in mine:
             conn.execute("UPDATE posts SET views = ? WHERE id = ?", (got.get(p["external_id"], (0, 0))[0], p["id"]))
+        if hasattr(pub, "retention"):
+            try:
+                kept = json.loads(db.get(conn, "retention", "{}"))
+                kept.update(pub.retention([p["external_id"] for p in mine]))
+                db.put(conn, "retention", json.dumps(kept))
+            except Exception:
+                log.exception("could not read %s watch-through", platform)
     conn.commit()
 
 

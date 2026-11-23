@@ -131,6 +131,8 @@ def test_produce_clips_an_uploaded_file_then_deletes_it(tmp_path, monkeypatch):
     from clip_engine.config import Settings
     from tests.test_core import FakePub, _claude_returning
 
+    from clip_engine import strategy
+    monkeypatch.setattr(strategy, "length_range", lambda arms: (20, 58))  # fixtures use long clips
     conn = db.connect(tmp_path / "e2e.db")
     _campaign(tmp_path, platforms=["youtube", "tiktok"])
     video = tmp_path / "uploads" / "ep1.mp4"
@@ -183,6 +185,8 @@ def _produce_fixture(tmp_path, monkeypatch, campaign_kwargs, titles):
     from clip_engine import layout, trends
     from tests.test_core import _claude_returning
 
+    from clip_engine import strategy
+    monkeypatch.setattr(strategy, "length_range", lambda arms: (20, 58))  # fixtures use clips up to a minute long
     conn = db.connect(tmp_path / "caps.db")
     _campaign(tmp_path, platforms=["youtube", "tiktok"], **campaign_kwargs)
     video = tmp_path / "uploads" / "ep1.mp4"
@@ -859,7 +863,7 @@ def _trim_run(tmp_path, monkeypatch, campaign_kwargs, picks):
 
     conn, claude = _produce_fixture(tmp_path, monkeypatch, campaign_kwargs, ["unused"])
     from clip_engine import strategy
-    monkeypatch.setattr(strategy, "length_range", lambda arms: (20, 58))  # the engine picks 20-35s or 35-58s at random
+    monkeypatch.setattr(strategy, "length_range", lambda arms: (20, 58))  # fixtures use clips up to a minute long
     monkeypatch.setattr(media, "duration", lambda p: 100.0)
     rendered = []
     monkeypatch.setattr(media, "render", lambda video_path, out, start, end, fmt, captions, **k: (
@@ -1661,3 +1665,29 @@ def test_status_times_are_eastern():
     assert dashboard.et_text(None) == ""
     assert dashboard.et_text("2026-07-04 18:05:00") == "Jul 4, 2:05pm ET"  # July is daylight time, one hour different
     assert dashboard.et_text("2026-11-18 05:00:00") == "Nov 18, 12:00am ET"  # midnight reads as 12:00am, not 0:00
+
+
+def test_short_clips_aim_for_fifteen_to_thirty_five_seconds_and_stay_off_the_edges():
+    from clip_engine import strategy
+    assert strategy.LENGTHS["short"] == ["15-25", "25-35"]
+    assert strategy.length_range({"length": "short:25-35"}) == (25, 35)
+    ass = media.captions_ass([{"start": 0.0, "end": 0.4, "word": "hi"}], 0, 1, "short", hook="wait for it")
+    assert ",2,110,110,520\n" in ass and ",8,110,110,260\n" in ass
+
+
+def test_refresh_views_stores_how_much_of_a_video_people_watch(tmp_path):
+    conn = db.connect(tmp_path / "r.db")
+    conn.execute("INSERT INTO clips (id, source_identifier, start_sec, end_sec, title, description, tags, arms, file_path,"
+        " media_token) VALUES (1, 's', 0, 20, 'c', 'd', '[]', '{}', 'x', ?)", ("t" * 32,))
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at, posted_at, external_id) "
+                 "VALUES (1, 'youtube', 'posted', datetime('now'), datetime('now'), 'vid1')")
+    conn.commit()
+
+    class Pub:
+        def stats(self, ids):
+            return {i: (10, 0) for i in ids}
+
+        def retention(self, ids):
+            return {i: 61.5 for i in ids}
+    pipeline.refresh_views(conn, {"youtube": Pub()})
+    assert json.loads(db.get(conn, "retention", "{}")) == {"vid1": 61.5}

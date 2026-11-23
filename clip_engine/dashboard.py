@@ -777,10 +777,14 @@ def status_page(conn, settings: Settings) -> str:
     names = {c.id: c.name for c in campaigns.load(settings.data_dir)}
     rows = conn.execute(
         "SELECT c.id, c.title, c.campaign_id, c.created_at FROM clips c ORDER BY c.id DESC LIMIT 200").fetchall()
+    try:
+        watched = json.loads(db.get(conn, "retention", "{}"))
+    except ValueError:
+        watched = {}
     out = []
     for c in rows:
         posts = conn.execute(
-            "SELECT platform, status, scheduled_at, posted_at, views, url FROM posts WHERE clip_id = ? ORDER BY platform",
+            "SELECT platform, status, scheduled_at, posted_at, views, url, external_id FROM posts WHERE clip_id = ? ORDER BY platform",
             (c["id"],)).fetchall()
         lines = []
         for p in posts:
@@ -795,7 +799,9 @@ def status_page(conn, settings: Settings) -> str:
                 when = f' for {e(et_text(p["scheduled_at"]))}'  # the same date format as the rest of the page
             views = f' &middot; {p["views"]:,} views' if p["status"] == "posted" and p["views"] is not None else ""
             link = f' &middot; {_link(p["url"], "open")}' if p["url"] else ""
-            lines.append(f'<li><b>{e(name)}</b>: {e(label)}{when}{views}{link}</li>')
+            pct = watched.get(p["external_id"]) if p["status"] == "posted" and p["external_id"] else None
+            kept = f' &middot; people watched {pct:g}% of it' if pct else ""
+            lines.append(f'<li><b>{e(name)}</b>: {e(label)}{when}{views}{kept}{link}</li>')
         out.append(
             f'<div class="card"><b>{e(c["title"])}</b>'
             f'<div class="muted">{e(names.get(c["campaign_id"], c["campaign_id"] or ""))} &middot; made '

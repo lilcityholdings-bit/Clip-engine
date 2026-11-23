@@ -319,6 +319,7 @@ def test_campaign_reward_uses_pay_rate():
 
 
 def test_produce_campaign_mode_end_to_end(conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(strategy, "length_range", lambda arms: (20, 58))  # fixture clips run up to a minute
     monkeypatch.setenv("CAMPAIGNS_JSON", json.dumps([{**CAMPAIGN, "platforms": ["youtube", "tiktok"]}]))
     settings = Settings(data_dir=tmp_path)
     src = sources.Source("https://youtu.be/ep1", "Ep 1", "Pod Host", CAMPAIGN["program_url"],

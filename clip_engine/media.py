@@ -113,14 +113,16 @@ def captions_ass(words: list[dict], start: float, end: float, fmt: str, hook: st
     # In the two-person layout, captions sit on the seam between the speakers.
     align = 5 if (short and center) else 2
     margin = 0 if align == 5 else margin
+    # Keep text away from the screen edges and the buttons down the right side of TikTok/Reels.
+    side = 110 if short else 60
     header = (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {res[0]}\nPlayResY: {res[1]}\nWrapStyle: 0\n\n"
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV\n"
-        f"Style: Default,DejaVu Sans,{size},{WHITE},{BLACK},{SHADOW},1,1,5,0,{align},60,60,{margin}\n"
-        f"Style: Hook,DejaVu Sans,{int(size * 0.9)},{BLACK},{WHITE},{SHADOW},1,3,18,0,8,80,80,260\n\n"
+        f"Style: Default,DejaVu Sans,{size},{WHITE},{BLACK},{SHADOW},1,1,5,0,{align},{side},{side},{margin}\n"
+        f"Style: Hook,DejaVu Sans,{int(size * 0.9)},{BLACK},{WHITE},{SHADOW},1,3,18,0,8,{side},{side},260\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Text\n"
     )
     clip_words = [w for w in words if w["start"] >= start - 0.05 and w["end"] <= end + 0.05]

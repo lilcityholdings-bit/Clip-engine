@@ -191,3 +191,12 @@ python -m pytest                         # tests
 - **Claude API:** 2–3 calls per production cycle, a few cents each.
 - **Railway:** one worker with about 2 GB of RAM (Whisper and ffmpeg), plus a 10 GB volume.
 - **Platform APIs:** free within their limits.
+
+## Built for watch-through (viral-clip rules)
+
+- Short clips are 15-25 s or 25-35 s; the engine learns which gets finished more.
+- Claude is told to start on the peak line (no intro), end when the payoff lands, and prefer moments that cause a
+  reaction (laugh, shock, hype, curiosity) without exaggerating beyond the footage or breaking campaign rules.
+- Captions use wide side margins so they stay off the screen edges and TikTok/Reels buttons.
+- YouTube watch-through (average % of the clip watched) is read hourly and shown on each clip's Clip status.
+  TikTok and Instagram don't give this to apps; read it in each app's analytics.

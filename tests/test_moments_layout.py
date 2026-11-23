@@ -76,8 +76,8 @@ def test_track_expression_and_graphs():
 
 def test_stacked_captions_sit_on_the_seam():
     words = [{"start": 0.0, "end": 0.4, "word": "hi"}]
-    assert ",5,60,60,0\n" in media.captions_ass(words, 0, 1, "short", center=True)
-    assert ",2,60,60,520\n" in media.captions_ass(words, 0, 1, "short")
+    assert ",5,110,110,0\n" in media.captions_ass(words, 0, 1, "short", center=True)
+    assert ",2,110,110,520\n" in media.captions_ass(words, 0, 1, "short")
 
 
 def test_real_detector_tuples_with_vertical_position():

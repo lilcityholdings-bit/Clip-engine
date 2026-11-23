@@ -60,6 +60,9 @@ class YouTubePublisher:
     def stats(self, ids: list[str]) -> dict[str, tuple[int, int]]:
         return self.yt.performance(ids, date.today() - timedelta(days=60))
 
+    def retention(self, ids: list[str]) -> dict[str, float]:
+        return self.yt.retention(ids, date.today() - timedelta(days=60))
+
 
 class TikTokPublisher:
     """TikTok Content Posting API (Direct Post). Needs the video.publish and video.list scopes.

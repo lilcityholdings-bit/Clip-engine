@@ -13,9 +13,9 @@ import sqlite3
 
 TITLE_STYLES = ["question", "number", "bold_claim", "curiosity_gap", "how_to"]
 FORMATS = ["short", "long"]
-# Clip length arms, in seconds, per format. Shorts must stay under 60s.
+# Clip length arms, in seconds, per format. Shorts stay 15-35s: long enough for a payoff, short enough to be finished.
 LENGTHS = {
-    "short": ["20-35", "35-58"],
+    "short": ["15-25", "25-35"],
     "long": ["120-300", "300-600"],
 }
 # Posting hours (UTC) to test: 9am, noon, 3pm, 6pm and 9pm US Eastern.
