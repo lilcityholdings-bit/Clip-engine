@@ -19,7 +19,7 @@ That's it. The direct YouTube, TikTok and Instagram connections described furthe
 
 ## Getting started checklist
 
-Until setup is finished, the top of the dashboard shows a checklist (Claude key, Connect YouTube, test upload, automatic posting, first campaign, first approved clip). It names the next step and puts its button right there, so you never have to hunt through Settings.
+Until setup is finished, the top of the dashboard shows a checklist (Claude key, Connect YouTube, first campaign, first approved clip). It names the next step and puts its button right there, so you never have to hunt through Settings.
 
 ## Platform rules the engine follows
 
@@ -157,7 +157,7 @@ Use company accounts for all of these so the business can be transferred to a bu
 4. **Credentials → Create credentials → OAuth client ID → Web application.** Under *Authorized redirect URIs* add `<dashboard address>/oauth/youtube/callback` exactly.
 5. Copy the client ID and secret into Railway Variables as `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET`.
 6. On the dashboard, under Settings → **YouTube connection**, tap **Connect YouTube**, sign in as the channel's account and allow access. Google warns that the app is unverified (it's your own app); choose Advanced → continue.
-7. Tap **Test a YouTube upload** on the dashboard. It uploads a 3-second unlisted video and reports whether Google forced it private. Delete the test video in YouTube Studio afterwards. Google's current documentation says uploads from unverified projects are not restricted to private, so you may not need an audit. If the test says uploads are kept private, apply with the **YouTube API Services - Audit and Quota Extension Form** (https://support.google.com/youtube/contact/yt_api_form). If it passes, tap **Turn automatic posting on**. If Google ever keeps an automatic upload private, the engine switches YouTube back to phone posting and shows a warning.
+7. **Automatic YouTube posting is switched off for good** (`YOUTUBE_AUTO_POSTING = False` in `clip_engine/youtube.py`); every YouTube clip is posted by hand like TikTok and Instagram, and the connection is only used to read views. The old steps below only apply if that constant is turned back on in code. Tap **Test a YouTube upload** on the dashboard. It uploads a 3-second unlisted video and reports whether Google forced it private. Delete the test video in YouTube Studio afterwards. Google's current documentation says uploads from unverified projects are not restricted to private, so you may not need an audit. If the test says uploads are kept private, apply with the **YouTube API Services - Audit and Quota Extension Form** (https://support.google.com/youtube/contact/yt_api_form). If it passes, tap **Turn automatic posting on**. If Google ever keeps an automatic upload private, the engine switches YouTube back to phone posting and shows a warning.
 
 **TikTok**
 1. On developers.tiktok.com, create an app with the **Content Posting API** (Direct Post), and request the scopes `video.publish` and `video.list`.

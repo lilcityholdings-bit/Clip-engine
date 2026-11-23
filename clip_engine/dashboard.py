@@ -1108,37 +1108,27 @@ def _youtube_card(conn, settings: Settings) -> str:
                      f'off. Post YouTube from your phone and request Google\'s audit.</div>' if lock else "")
         result = db.get(conn, "youtube_test_result")
         result_html = f'<div class="muted">Last test: {e(result)}</div>' if result else ""
-        body = (f'{lock_html}<div class="muted">Automatic posting: {"on" if auto else "off"}. Google may keep videos '
-                f'uploaded by a new project private. Run the test below first; if it says uploads stay public, turn '
-                f'automatic posting on. Otherwise post YouTube from your phone.</div>{result_html}'
-                f'<div class="row" style="margin-top:8px"><form class="inline" method="post" '
-                f'action="/settings/youtube-auto"><button>{"Turn automatic posting off" if auto else "Turn automatic posting on"}</button></form>'
-                f'<form class="inline" method="post" action="/settings/youtube-test"><button>Test a YouTube upload</button></form>'
+        body = (f'{lock_html}<div class="muted">YouTube clips are posted by hand from your phone; nothing is '
+                f'uploaded automatically. The connection is only used to read views.</div>{result_html}'
+                f'<div class="row" style="margin-top:8px">'
                 f'<a class="button" href="/connect/youtube">Reconnect</a>'
                 f'<form class="inline" method="post" action="/settings/youtube-disconnect" '
-                f'onsubmit="return confirm(\'Cancel the YouTube login? Posting stops until you reconnect.\')">'
+                f'onsubmit="return confirm(\'Cancel the YouTube login? Reading views stops until you reconnect.\')">'
                 f'<button>Disconnect and cancel login</button></form></div>'
-                f'<div class="muted" style="margin-top:6px">The test uploads a 3-second unlisted video. Delete it in '
-                f'YouTube Studio afterwards. Disconnect cancels the saved login at Google; use it if you think '
-                f'someone else got hold of it.</div>')
+                f'<div class="muted" style="margin-top:6px">Disconnect cancels the saved login at Google; use it if '
+                f'you think someone else got hold of it.</div>')
     return f'<div class="card"><b>YouTube connection:</b> {status}{body}</div>'
 
 
 def setup_steps(conn, settings: Settings) -> list[tuple[str, bool, str]]:
     """(step, done, how to do it) for everything needed before clips go out."""
     connected = bool(youtube.stored_token(conn, settings))
-    tested = (db.get(conn, "youtube_test_result") or "").startswith("uploads are not locked")
-    auto = youtube.auto_posting_on(conn)
     decided = conn.execute("SELECT 1 FROM posts WHERE status != 'review' LIMIT 1").fetchone() is not None
     return [
         ("Add your Claude API key", bool(os.environ.get("ANTHROPIC_API_KEY")),
          "Create a key at console.anthropic.com (API Keys) and set a monthly spending limit. In Railway, open "
          "clip-engine, Variables, and add it as ANTHROPIC_API_KEY."),
         ("Connect YouTube", connected, '<a class="button" href="/connect/youtube">Connect YouTube</a>'),
-        ("Test a YouTube upload", tested or auto,
-         '<form class="inline" method="post" action="/settings/youtube-test"><button>Test a YouTube upload</button></form>'),
-        ("Turn on automatic YouTube posting", auto,
-         '<form class="inline" method="post" action="/settings/youtube-auto"><button>Turn it on</button></form>'),
         ("Add a campaign", bool(campaigns.load(settings.data_dir)),
          'Join a clipping campaign (for example on Whop), then fill in <a href="#campaigns">Add a campaign</a>.'),
         ("Approve your first clip", decided,

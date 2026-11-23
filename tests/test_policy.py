@@ -58,11 +58,7 @@ def test_getting_started_points_to_the_next_step(tmp_path, monkeypatch):
     settings = Settings(data_dir=tmp_path, youtube_refresh_token="", youtube_client_id="c", youtube_client_secret="s")
     conn = db.connect(settings.db_path)
     html = dashboard._getting_started(conn, settings)
-    assert "0 of 6 done" in html and "Next: Add your Claude API key" in html
+    assert "0 of 4 done" in html and "Next: Add your Claude API key" in html
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     db.put(conn, "youtube_refresh_token", "R")
-    db.put(conn, "youtube_test_result", "uploads are not locked (status: unlisted)")
-    html = dashboard._getting_started(conn, settings)
-    assert "3 of 6 done" in html and "Next: Turn on automatic YouTube posting" in html
-    db.put(conn, "youtube_auto", "on")
     assert "Next: Add a campaign" in dashboard._getting_started(conn, settings)

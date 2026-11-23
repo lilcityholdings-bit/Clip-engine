@@ -15,7 +15,7 @@ An automated clipping business. Creators in paid clipping programs (for example 
 
 Done
 - Engine built, tested (224 passing) and running on Railway, always on at about 80 MB idle. Review mode on (nothing posts without approval); gradual start (4 clips/day in week 1, then 6). Currently PAUSED on purpose until the first campaign is added.
-- YouTube: channel @littlecityclips connected, test upload passed (not forced private), automatic posting on. No Google audit needed.
+- YouTube: channel @littlecityclips connected, test upload passed (not forced private), automatic posting removed on 2026-11-23 at the owner's request (YouTube is posted by hand; YouTube watch-through % no longer fills in).
 - Claude API: Anthropic organization "Little City Digital LLC" (Console), $25 monthly spend limit, key added in Railway as ANTHROPIC_API_KEY. Engine uses claude-opus-5-5.
 - Security after Railway's 2026-10-21 breach: rotated the Google client secret and dashboard password, cancelled and reconnected the YouTube login, Railway passkey 2FA. Disconnect-YouTube button and password lockout added.
 - Platform-rule protections, per-clip account tick boxes (and default accounts in Settings), phone alerts via a Discord webhook (code done, webhook not set up yet).

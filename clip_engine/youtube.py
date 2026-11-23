@@ -86,10 +86,15 @@ def stored_token(conn: sqlite3.Connection, settings: Settings) -> str:
     return db.get(conn, "youtube_refresh_token") or settings.youtube_refresh_token
 
 
+# YouTube is posted by hand from the phone. The automatic uploader stays in the code but is switched off here,
+# so neither a saved setting nor the YOUTUBE_AUTO variable can turn it on again.
+YOUTUBE_AUTO_POSTING = False
+
+
 def auto_posting_on(conn: sqlite3.Connection) -> bool:
     """YouTube only posts automatically once you've switched it on, after Google approves the project.
     Before that, API uploads are kept private, so clips are better posted from the app."""
-    return db.get(conn, "youtube_auto") == "on"
+    return YOUTUBE_AUTO_POSTING and db.get(conn, "youtube_auto") == "on"
 
 
 def effective_settings(conn: sqlite3.Connection, settings: Settings) -> Settings:

@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from . import db
+from . import youtube as youtube_module
 from .config import Settings
 
 log = logging.getLogger(__name__)
@@ -338,7 +339,7 @@ def enabled(settings: Settings, conn: sqlite3.Connection, yt) -> dict:
     """Publishers whose credentials are configured, by name."""
     pubs = {}
     # YouTube posts automatically only once connected and switched on (after Google's approval).
-    if settings.youtube_refresh_token and yt is not None and (
+    if youtube_module.YOUTUBE_AUTO_POSTING and settings.youtube_refresh_token and yt is not None and (
             db.get(conn, "youtube_auto") == "on" or os.environ.get("YOUTUBE_AUTO") == "1"):
         def on_private(video_id: str) -> None:
             """Google kept an upload private: stop automatic YouTube posting and tell the owner."""

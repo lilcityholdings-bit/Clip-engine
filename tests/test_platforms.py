@@ -19,6 +19,11 @@ def _resp(payload, status=200):
 
 
 @pytest.fixture
+def auto_youtube(monkeypatch):
+    monkeypatch.setattr(youtube, "YOUTUBE_AUTO_POSTING", True)
+
+
+@pytest.fixture
 def conn():
     return db.connect(":memory:")
 
@@ -96,7 +101,7 @@ def test_instagram_needs_public_url(conn, tmp_path):
         pub.publish(CLIP, tmp_path / "c.mp4", "")
 
 
-def test_enabled_depends_on_credentials(conn, monkeypatch):
+def test_enabled_depends_on_credentials(conn, monkeypatch, auto_youtube):
     for k in ("TIKTOK_CLIENT_KEY", "TIKTOK_REFRESH_TOKEN", "INSTAGRAM_USER_ID", "INSTAGRAM_ACCESS_TOKEN"):
         monkeypatch.delenv(k, raising=False)
     def auto(pubs):
@@ -639,14 +644,30 @@ def test_exchange_failure_is_reported(yt_server, monkeypatch):
     assert "redirect_uri_mismatch" in location and db.get(conn, "youtube_refresh_token") is None
 
 
-def test_youtube_card_guides_setup_and_toggle(yt_server, tmp_path):
+def test_youtube_card_says_youtube_is_posted_by_hand(yt_server, tmp_path):
     base, conn, _ = yt_server
     assert "Connect YouTube</a>" in _get(base + "/", "s3cret").read().decode()
     db.put(conn, "youtube_refresh_token", "R")
     page = _get(base + "/", "s3cret").read().decode()
-    assert "Automatic posting: off" in page and "Turn automatic posting on" in page and "Test a YouTube upload" in page
-    _get(base + "/settings/youtube-auto", "s3cret", data=b"")
-    assert youtube.auto_posting_on(db.connect(tmp_path / "clip_engine.db"))
+    assert "posted by hand" in page and "Turn automatic posting on" not in page and "Test a YouTube upload" not in page
+    _get(base + "/settings/youtube-auto", "s3cret", data=b"")  # an old bookmark or form can't switch it on
+    assert not youtube.auto_posting_on(db.connect(tmp_path / "clip_engine.db"))
+
+
+def test_youtube_never_posts_automatically_and_waiting_posts_become_hand_posts(tmp_path, monkeypatch):
+    from clip_engine import __main__ as m
+    settings = Settings(data_dir=tmp_path, youtube_refresh_token="R", youtube_client_id="c", youtube_client_secret="s")
+    conn = db.connect(settings.db_path)
+    db.put(conn, "youtube_auto", "on")
+    monkeypatch.setenv("YOUTUBE_AUTO", "1")
+    conn.execute("INSERT INTO clips (id, source_identifier, start_sec, end_sec, title, description, tags, arms,"
+                 " file_path, media_token) VALUES (1, 's', 0, 20, 'c', 'd', '[]', '{}', 'x', ?)", ("t" * 32,))
+    conn.execute("INSERT INTO posts (clip_id, platform, status, scheduled_at) VALUES (1, 'youtube', 'queued', datetime('now'))")
+    conn.commit()
+    monkeypatch.setattr(m, "YouTube", lambda s: MagicMock())
+    _, _, pubs = m.build_publishers(conn, settings)
+    assert platforms.is_manual(pubs["youtube"])
+    assert conn.execute("SELECT status FROM posts").fetchone()[0] == "ready"
 
 
 def test_card_explains_missing_google_keys(server):
@@ -661,7 +682,7 @@ def test_privacy_page_is_public(server):
     assert "privacy policy" in page and "Limited Use" in page
 
 
-def test_main_rebuilds_publishers_after_connect(tmp_path, monkeypatch):
+def test_main_rebuilds_publishers_after_connect(tmp_path, monkeypatch, auto_youtube):
     from clip_engine import __main__ as m
     settings = Settings(data_dir=tmp_path, youtube_client_id="c", youtube_client_secret="s", youtube_refresh_token="")
     conn = db.connect(settings.db_path)
@@ -717,7 +738,7 @@ def test_test_upload_reports_lock_or_success(tmp_path, monkeypatch):
         assert not (tmp_path / "w" / "connection-test.mp4").exists()
 
 
-def test_publisher_switches_off_when_google_keeps_upload_private(tmp_path):
+def test_publisher_switches_off_when_google_keeps_upload_private(tmp_path, auto_youtube):
     conn = db.connect(":memory:")
     db.put(conn, "youtube_auto", "on")
     yt, _ = _yt_with_response(tmp_path, {"id": "abc", "status": {"privacyStatus": "private"}})

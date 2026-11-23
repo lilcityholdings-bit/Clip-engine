@@ -59,6 +59,11 @@ def build_publishers(conn, base_settings: Settings):
     pubs = platforms.enabled(settings, conn, yt)
     auto = [name for name, pub in pubs.items() if not platforms.is_manual(pub)]
     db.put(conn, "auto_platforms", ",".join(auto))
+    # A platform posted by hand has nothing to send on its own: anything still queued for it waits for you instead.
+    for name in pubs:
+        if name not in auto:
+            conn.execute("UPDATE posts SET status = 'ready' WHERE platform = ? AND status = 'queued'", (name,))
+    conn.commit()
     log.info("posting automatically to: %s; from your phone: %s", ", ".join(auto) or "none",
              ", ".join(n for n in pubs if n not in auto) or "none")
     return settings, yt, pubs
