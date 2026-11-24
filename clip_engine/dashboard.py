@@ -236,6 +236,8 @@ document.querySelectorAll('#own-video select[name=campaign]').forEach(function (
 function sendVideo(form, btn) {
   const files = Array.from(form.file.files);
   if (!files.length) { alert('Choose at least one file first.'); return false; }
+  const bad = files.find(f => !/\\.(mp4|mov|mkv|webm|m4v|jpe?g|png|webp)$/i.test(f.name));
+  if (bad) { alert(bad.name + ' is not a video or photo this can use. Use mp4, mov, mkv, webm, m4v, jpg, png or webp.'); return false; }
   const combine = form.mode.value === 'combine';
   const batch = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
   const status = form.querySelector('.status');
@@ -530,8 +532,9 @@ def _own_video(conn, settings: Settings) -> str:
     return (
         '<section id="own-video"><h2>Add a video</h2>' + queue_html +
         '<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">' + campaign +
-        f'<label>Video or photos <small>(one video is cut into clips; several files are combined)</small></label>'
-        f'<input type="file" name="file" accept="video/*,image/*" multiple>' + count + seconds + notes + caption +
+        f'<label>Video or photos <small>(one video is cut into clips; several files are combined). On a phone, tap '
+        f'Choose file, then <b>Files</b> or <b>Downloads</b> to pick something you downloaded.</small></label>'
+        f'<input type="file" name="file" multiple>' + count + seconds + notes + caption +
         '<details style="margin-top:10px"><summary>More options</summary>' + names +
         '<div class="checks" style="flex-direction:column;align-items:flex-start;margin-top:8px"><b>With several files:</b>'
         '<label><input type="radio" name="mode" value="combine" checked> <b>Combine</b> them into new videos, in a smart '
