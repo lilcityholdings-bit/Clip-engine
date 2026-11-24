@@ -1766,3 +1766,30 @@ def test_review_cards_offer_redo_with_changes(server, tmp_path):
     assert "Redo with changes" in _get(base + "/", "s3cret").read().decode()
     assert "Redo with changes" in _get(f"{base}/clip/{cid}", "s3cret").read().decode()
     assert 'name="notes"' in _get(base + "/", "s3cret").read().decode()
+
+
+def test_a_length_you_pick_replaces_the_one_the_engine_is_testing(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    assert manual.clean_seconds("15-25") == "15-25" and manual.clean_seconds("1-999") == "" and manual.seconds_range("") is None
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["A good clip"])
+    item = manual.pop(conn)
+    manual.add(conn, {**item, "count": 1, "seconds": "10-20"})
+    pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}, 2)
+    assert "10-20 seconds long" in _sent_prompt(claude)
+
+
+def test_a_redo_can_change_only_the_length(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["First try"])
+    item = manual.pop(conn)
+    manual.add(conn, {**item, "count": 1, "review": True, "seconds": "25-35"})
+    pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}, 2)
+    cid = conn.execute("SELECT id FROM clips").fetchone()[0]
+    assert pipeline.redo(conn, cid, "", "").startswith("Say what")
+    assert pipeline.redo(conn, cid, "", "10-20").startswith("Got it")
+    [queued] = manual.queue(conn)
+    assert queued["seconds"] == "10-20" and "10 to 20 seconds" in queued["notes"]

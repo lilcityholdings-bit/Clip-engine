@@ -212,7 +212,11 @@ def _build_project(item: dict, campaign: campaigns.Campaign, claude: anthropic.A
         raise FileNotFoundError("none of the uploaded files are left")
     stem = Path(files[0]).stem
     work = files[0].parent / f"build-{stem}"
-    budget = media.COMPILATION_MAX_SEC if item.get("length") == "60" else media.COMPILATION_DEFAULT_SEC
+    chosen = manual.seconds_range(item.get("seconds", ""))
+    if chosen:  # a length you picked beats the 30/60 choice
+        budget = min(chosen[1], media.COMPILATION_MAX_SEC)
+    else:
+        budget = media.COMPILATION_MAX_SEC if item.get("length") == "60" else media.COMPILATION_DEFAULT_SEC
     base = item.get("title") or campaign.name
     count = max(1, min(item.get("count", 1), len(files), manual.MAX_VIDEOS))
     out = files[0].parent / f"{stem}-combined.mp4"
@@ -578,12 +582,14 @@ def reject(conn: sqlite3.Connection, clip_id: int) -> None:
     cleanup_files(conn)
 
 
-def redo(conn: sqlite3.Connection, clip_id: int, notes: str) -> str:
+def redo(conn: sqlite3.Connection, clip_id: int, notes: str, seconds: str = "") -> str:
     """Reject a clip that hasn't been posted and queue its video again with the owner's changes. Returns a message
     for the owner; the clip is only rejected when the original video is still here to make a new one from."""
     notes = manual.clean_notes(notes)
-    if not notes:
+    seconds = manual.clean_seconds(seconds)
+    if not notes and not seconds:
         return "Say what you want changed first."
+    notes = notes or f"make it {manual.LENGTH_CHOICES[seconds]} long"
     row = conn.execute("SELECT source_identifier, title, start_sec, end_sec FROM clips WHERE id = ?", (clip_id,)).fetchone()
     if row is None:
         return "That clip is gone."
@@ -593,7 +599,7 @@ def redo(conn: sqlite3.Connection, clip_id: int, notes: str) -> str:
     earlier = (f" (an earlier version of this started at {row['start_sec']:.0f}s and ended at {row['end_sec']:.0f}s "
                f"and was rejected)" if item.get("kind") != "project" else " (an earlier version was rejected)")
     manual.add(conn, {**item, "count": 1, "review": True, "redo": True, "attempts": 0,
-                      "notes": manual.clean_notes(f"{notes}{earlier}")})
+                      "seconds": seconds or item.get("seconds", ""), "notes": manual.clean_notes(f"{notes}{earlier}")})
     delete_clip(conn, clip_id)
     return "Got it. A new version is being made with your changes."
 
@@ -726,6 +732,8 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
         if not job.whole and media.has_audio(video):  # a silent file can't be transcribed
             segments, words = media.transcribe(video, settings.whisper_model, windows or None)
         lo, hi = strategy.length_range(arms)
+        if job.item and (chosen := manual.seconds_range(job.item.get("seconds", ""))):
+            lo, hi = chosen  # the length you asked for, instead of one the engine is testing
         visual = False
         if job.whole:
             # Built from your own files: the whole video is the clip, never cut up or re-framed.

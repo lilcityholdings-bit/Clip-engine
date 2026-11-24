@@ -244,7 +244,7 @@ function sendVideo(form, btn) {
   const next = () => {
     const file = files[i];
     const q = new URLSearchParams({campaign: form.campaign.value, creator: form.creator.value,
-                                   title: form.title.value, length: form.length.value, count: form.count.value, notes: form.notes.value, review: form.review.checked ? '1' : '', name: file.name,
+                                   title: form.title.value, length: form.length.value, count: form.count.value, notes: form.notes.value, seconds: form.seconds.value, review: form.review.checked ? '1' : '', name: file.name,
                                    batch: combine ? batch : '', last: i === files.length - 1 ? '1' : ''});
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/manual-video/upload?' + q.toString());
@@ -323,14 +323,20 @@ function copyAndOpen(link, page) {
 BIG = 'style="font-size:18px;padding:14px 18px;width:100%;margin-top:8px"'
 
 
+def _length_select(blank: str) -> str:
+    """The clip-length picker; `blank` is the first option (leave it to the engine, or keep the old length)."""
+    return ('<select name="seconds" style="width:100%;font:inherit;padding:9px"><option value="">' + blank + '</option>'
+            + "".join(f'<option value="{k}">{v}</option>' for k, v in manual.LENGTH_CHOICES.items()) + '</select>')
+
+
 def _redo_form(clip_id: int, back: str = "/") -> str:
     """Reject a clip but ask for a new version with your instructions (the video is kept for 3 days)."""
     return (f'<details style="margin-top:8px"><summary>&#9998; Redo with changes</summary>'
             f'<form method="post" action="/clip/redo"><input type="hidden" name="id" value="{clip_id}">'
             f'<input type="hidden" name="back" value="{back}">'
             f'<label>What should be different? <small>(this clip is deleted and a new one is made)</small></label>'
-            f'<textarea name="notes" rows="3" maxlength="600" required placeholder="Example: start at the funny part, '
-            f'make it shorter, no talking at the start"></textarea>'
+            f'<textarea name="notes" rows="3" maxlength="600" placeholder="Example: start at the funny part, '
+            f'no talking at the start"></textarea><label>Length</label>{_length_select("Keep the same length")}'
             f'<button class="primary" style="margin-top:6px">Make a new version</button></form></details>')
 
 
@@ -511,6 +517,7 @@ def _own_video(conn, settings: Settings) -> str:
              + '</select>')
     review = ('<label style="margin-top:8px"><input type="checkbox" name="review" checked> Let me watch each clip before it '
               'can post</label>')
+    seconds = '<label>How long should each clip be?</label>' + _length_select("Best (the engine decides)")
     notes = ('<label>Special instructions <small>(optional: how you want it cut or what to show)</small></label>'
              '<textarea name="notes" rows="2" maxlength="600" placeholder="Example: use the part where he laughs, '
              'keep it under 20 seconds, no intro"></textarea>')
@@ -521,7 +528,7 @@ def _own_video(conn, settings: Settings) -> str:
         '<section id="own-video"><h2>Add a video</h2>' + queue_html +
         '<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">' + campaign +
         f'<label>Video or photos <small>(one video is cut into clips; several files are combined)</small></label>'
-        f'<input type="file" name="file" accept="video/*,image/*" multiple>' + count + notes +
+        f'<input type="file" name="file" accept="video/*,image/*" multiple>' + count + seconds + notes +
         '<details style="margin-top:10px"><summary>More options</summary>' + names +
         '<div class="checks" style="flex-direction:column;align-items:flex-start;margin-top:8px"><b>With several files:</b>'
         '<label><input type="radio" name="mode" value="combine" checked> <b>Combine</b> them into new videos, in a smart '
@@ -534,7 +541,7 @@ def _own_video(conn, settings: Settings) -> str:
         '<button class="primary" type="submit" style="margin-top:8px">Upload</button></form>'
         '<details style="margin-top:12px"><summary>Paste a link instead</summary>'
         '<form method="post" action="/manual-video/link">' + campaign +
-        '<label>Video link</label><input type="url" name="url" placeholder="https://">' + count + notes + review + names +
+        '<label>Video link</label><input type="url" name="url" placeholder="https://">' + count + seconds + notes + review + names +
         '<button class="primary" style="margin-top:10px">Add video</button></form></details>'
         + UPLOAD_JS + '</section>')
 
@@ -1604,7 +1611,8 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     pipeline.delete_clip(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/clip/redo":
                     form = self._form()
-                    note = pipeline.redo(conn, int(form.get("id", ["0"])[0] or 0), form.get("notes", [""])[0])
+                    note = pipeline.redo(conn, int(form.get("id", ["0"])[0] or 0), form.get("notes", [""])[0],
+                                         form.get("seconds", [""])[0])
                     if note.startswith("Got it"):
                         note = start_now(conn, settings, note)
                     return self._redirect("/?" + urlencode({"notice": note}))
@@ -1686,6 +1694,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                               "title": manual.clean_text(form.get("title", "")),
                               "count": manual.clean_count(form.get("count", "")),
                               "notes": manual.clean_notes(form.get("notes", "")),
+                              "seconds": manual.clean_seconds(form.get("seconds", "")),
                               "review": form.get("review") == "on"})
             return self._redirect("/?" + urlencode({"notice": start_now(conn, settings, "Video added.")}))
 
@@ -1724,6 +1733,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                                 "length": manual.clean_length(query.get("length", "")),
                                 "count": manual.clean_count(query.get("count", "")),
                                 "notes": manual.clean_notes(query.get("notes", "")),
+                                "seconds": manual.clean_seconds(query.get("seconds", "")),
                                 "review": query.get("review") == "1"})
                             queued = manual.queue(conn)[-1]
                             if queued["kind"] == "file":  # a single video is cut into clips, not combined
@@ -1742,6 +1752,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                                   "title": manual.clean_text(query.get("title", "")) or Path(query["name"]).stem[:60],
                                   "count": manual.clean_count(query.get("count", "")),
                                   "notes": manual.clean_notes(query.get("notes", "")),
+                                  "seconds": manual.clean_seconds(query.get("seconds", "")),
                                   "review": query.get("review") == "1"})
                 message = start_now(conn, settings, "Video uploaded.")
             finally:

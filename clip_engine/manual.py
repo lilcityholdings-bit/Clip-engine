@@ -192,6 +192,24 @@ def clean_notes(value: str) -> str:
     return text[:600]
 
 
+LENGTH_CHOICES = {"10-20": "10 to 20 seconds", "15-25": "15 to 25 seconds", "25-35": "25 to 35 seconds",
+                  "35-58": "35 to 58 seconds"}
+
+
+def clean_seconds(value: str) -> str:
+    """The clip length you chose, "10-20" and so on, or "" to let the engine decide."""
+    value = (value or "").strip()
+    return value if value in LENGTH_CHOICES else ""
+
+
+def seconds_range(value: str) -> tuple[int, int] | None:
+    value = clean_seconds(value)
+    if not value:
+        return None
+    lo, hi = value.split("-")
+    return int(lo), int(hi)
+
+
 REDO_KEY = "redo_sources"
 REDO_DAYS = 3
 

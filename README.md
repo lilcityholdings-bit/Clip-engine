@@ -210,3 +210,6 @@ python -m pytest                         # tests
   one new version is made from the same video, with your words added. To make this possible an upload that is set to
   "Let me watch each clip" is kept for **3 days** (`manual.REDO_DAYS`) and then deleted by the daily cleanup; after that the
   button says to upload the video again. Redo makes one new clip each time and still shows it for approval.
+- **Length:** the Add a video forms have **How long should each clip be?** (10-20, 15-25, 25-35 or 35-58 seconds; the default
+  lets the engine test lengths itself). A chosen length replaces the tested one for that upload (and caps a combined
+  video's length). **Redo with changes** has the same picker, and "Keep the same length" is the default.
