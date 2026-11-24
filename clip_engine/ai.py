@@ -267,6 +267,40 @@ def arrange_pieces(client: anthropic.Anthropic, pieces: list[tuple[str, bytes]],
     return _json_call(client, content, ARRANGE_SCHEMA, effort="low")
 
 
+CAPTIONS_SCHEMA = {
+    "type": "object",
+    "properties": {"captions": {"type": "array", "items": {"type": "string"}}},
+    "required": ["captions"],
+    "additionalProperties": False,
+}
+
+
+def caption_from_frames(client: anthropic.Anthropic, frames: list[bytes], brief: str, notes: str = "") -> list[str]:
+    """Write one caption per frame for clips of footage with nothing to read (silent or music only).
+
+    Claude only sees pictures, so the captions describe what is visible, plainly and truthfully. Returns exactly
+    len(frames) captions, in order; the caller falls back to something safe when this raises.
+    """
+    import base64
+    content: list[dict] = [{"type": "text", "text": (
+        f"Write a caption for each of {len(frames)} different short social clips cut from one video with no speech, "
+        f"for this paid campaign: {brief or 'none'}\n"
+        "You see one frame from each clip. Each caption is at most 80 characters and says plainly and truthfully what "
+        "the viewer sees, in a way that makes someone curious to watch. Describe only what is visible: no claims, "
+        "facts, stats, dates, names you can't read on screen, no hashtags, no mentions, no emojis, nothing exaggerated "
+        "or clickbait. The captions must differ from each other."
+        + (f"\nThe owner's instructions (follow them): {notes}" if notes else ""))}]
+    for i, jpeg in enumerate(frames):
+        content.append({"type": "text", "text": f"Clip {i}:"})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                     "data": base64.b64encode(jpeg).decode()}})
+    content.append({"type": "text", "text": f"Reply with `captions`: exactly {len(frames)} captions, in clip order."})
+    captions = [str(c).strip() for c in _json_call(client, content, CAPTIONS_SCHEMA, effort="low")["captions"]]
+    if len(captions) != len(frames) or not all(captions):
+        raise ValueError(f"expected {len(frames)} captions, got {captions!r}")
+    return captions
+
+
 VIDEOS_SCHEMA = {
     "type": "object",
     "properties": {

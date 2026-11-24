@@ -213,3 +213,10 @@ python -m pytest                         # tests
 - **Length:** the Add a video forms have **How long should each clip be?** (10-20, 15-25, 25-35 or 35-58 seconds; the default
   lets the engine test lengths itself). A chosen length replaces the tested one for that upload (and caps a combined
   video's length). **Redo with changes** has the same picker, and "Keep the same length" is the default.
+- **Videos with no talking (silent or music only):** now work on every campaign. The engine cuts along the shot changes
+  (`moments.visual_windows`) and captions each clip one of two ways: **your own captions** (type them in *Caption for videos
+  with no talking*, one per line; it makes no more clips than captions you wrote) or **auto** (leave it empty: Claude looks at one
+  frame of each clip and writes a plain, factual caption from what it sees, no claims or hashtags; it follows your special
+  instructions; if Claude fails, the caption is the video's title with a number). Campaigns with approved captions still use
+  those. The length picker does not apply to these cuts, which follow the shot changes (up to 58 s). Captions from pictures
+  alone can be wrong, so keep "Let me watch each clip" ticked.

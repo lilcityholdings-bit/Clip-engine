@@ -762,9 +762,31 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             clips = [{"start": a, "end": b, "title": "", "description": "", "tags": [], "hook_text": "",
                       "hashtags": [], "score": None} for a, b in spans]
             log.info("no speech in %s; cutting %d clips by shot changes", src.identifier, len(clips))
+        elif campaign is not None and not job.whole:
+            # Nothing is said (silent or music only): cut along the shot changes and caption from your own words,
+            # or let Claude describe what it sees.
+            visual, recent = True, []
+            mine = [c for c in (job.item or {}).get("caption", []) if c]
+            span_max = min(hi, 58)
+            spans = moments.visual_windows(media.scene_cuts(video), src.duration, span_max, min(remaining, len(mine) or remaining))
+            if mine:
+                captions = (mine * len(spans))[:len(spans)] if len(mine) >= len(spans) else mine
+                spans = spans[:len(captions)]
+            else:
+                try:
+                    frames = [media.frame_at(video, work / f"cap{n}.jpg", (a + b) / 2) for n, (a, b) in enumerate(spans)]
+                    captions = ai.caption_from_frames(
+                        claude, frames, "; ".join(x for x in (campaign.name, campaign.niche, campaign.rules) if x),
+                        (job.item or {}).get("notes", "")) if frames else []
+                except Exception:
+                    log.exception("could not caption %s from its pictures", src.identifier)
+                    captions = [f"{src.title} ({n})" if len(spans) > 1 else src.title for n in range(1, len(spans) + 1)]
+            clips = [{"start": a, "end": b, "title": t, "description": "", "tags": [], "hook_text": "",
+                      "hashtags": [], "score": None} for (a, b), t in zip(spans, captions)]
+            log.info("no speech in %s; cutting %d clips by shot changes with %s captions", src.identifier, len(clips),
+                     "your" if mine else "picture-based")
         else:
-            _note(conn, f'No speech was found in "{src.title}", so there was nothing to pick clips from. For '
-                        "footage without talking, add the campaign's approved captions and upload it again.")
+            _note(conn, f'No speech was found in "{src.title}", so there was nothing to pick clips from.')
             finished = True
             return 0
         taken: list[tuple[float, float]] = []  # the footage of the clips made so far: each must be different

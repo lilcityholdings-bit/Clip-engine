@@ -316,6 +316,13 @@ def thumbnail(src: Path, out: Path, photo: bool) -> bytes:
     return out.read_bytes()
 
 
+def frame_at(src: Path, out: Path, at: float) -> bytes:
+    """A small JPEG of the video at a moment, for Claude to look at."""
+    _run(["ffmpeg", "-y", "-v", "error", "-ss", f"{max(at, 0):.2f}", "-i", str(src), "-frames:v", "1",
+          "-vf", "scale=512:512:force_original_aspect_ratio=decrease", "-q:v", "5", str(out)])
+    return out.read_bytes()
+
+
 def assemble(pieces: list[Path], out: Path, work: Path, budget: float = COMPILATION_DEFAULT_SEC,
              audio: bool | None = None) -> Path:
     """Join videos and photos, in the order given, into one 1080x1920 video of 15 to `budget` seconds (30 or 59).

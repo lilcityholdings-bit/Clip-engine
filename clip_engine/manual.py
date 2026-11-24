@@ -186,6 +186,12 @@ def clean_length(value: str) -> str:
     return "60" if (value or "").strip() == "60" else "30"
 
 
+def clean_captions(value: str) -> list[str]:
+    """Captions the owner typed, one per line (at most 4, 150 characters each)."""
+    lines = [re.sub(r"[\x00-\x1f\x7f]", " ", line).strip() for line in (value or "").splitlines()]
+    return [line[:150] for line in lines if line][:MAX_VIDEOS]
+
+
 def clean_notes(value: str) -> str:
     """The owner's own instructions for how a video should be cut (kept short; control characters removed)."""
     text = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f]", " ", value or "")).strip()

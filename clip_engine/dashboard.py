@@ -244,7 +244,7 @@ function sendVideo(form, btn) {
   const next = () => {
     const file = files[i];
     const q = new URLSearchParams({campaign: form.campaign.value, creator: form.creator.value,
-                                   title: form.title.value, length: form.length.value, count: form.count.value, notes: form.notes.value, seconds: form.seconds.value, review: form.review.checked ? '1' : '', name: file.name,
+                                   title: form.title.value, length: form.length.value, count: form.count.value, notes: form.notes.value, caption: form.caption.value, seconds: form.seconds.value, review: form.review.checked ? '1' : '', name: file.name,
                                    batch: combine ? batch : '', last: i === files.length - 1 ? '1' : ''});
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/manual-video/upload?' + q.toString());
@@ -521,6 +521,9 @@ def _own_video(conn, settings: Settings) -> str:
     notes = ('<label>Special instructions <small>(optional: how you want it cut or what to show)</small></label>'
              '<textarea name="notes" rows="2" maxlength="600" placeholder="Example: use the part where he laughs, '
              'keep it under 20 seconds, no intro"></textarea>')
+    caption = ('<label>Caption for videos with no talking <small>(optional: type your own, one per line. Leave it empty '
+               'and Claude writes one from what it sees)</small></label><textarea name="caption" rows="2" '
+               'maxlength="600" placeholder="Leave empty = Claude writes it (auto)"></textarea>')
     names = ('<label>Creator\'s name <small>(credited in the caption; optional)</small></label><input type="text" name="creator">'
              '<label>Title <small>(optional; the post title when the campaign has no approved captions)</small></label>'
              '<input type="text" name="title">')
@@ -528,7 +531,7 @@ def _own_video(conn, settings: Settings) -> str:
         '<section id="own-video"><h2>Add a video</h2>' + queue_html +
         '<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">' + campaign +
         f'<label>Video or photos <small>(one video is cut into clips; several files are combined)</small></label>'
-        f'<input type="file" name="file" accept="video/*,image/*" multiple>' + count + seconds + notes +
+        f'<input type="file" name="file" accept="video/*,image/*" multiple>' + count + seconds + notes + caption +
         '<details style="margin-top:10px"><summary>More options</summary>' + names +
         '<div class="checks" style="flex-direction:column;align-items:flex-start;margin-top:8px"><b>With several files:</b>'
         '<label><input type="radio" name="mode" value="combine" checked> <b>Combine</b> them into new videos, in a smart '
@@ -541,7 +544,7 @@ def _own_video(conn, settings: Settings) -> str:
         '<button class="primary" type="submit" style="margin-top:8px">Upload</button></form>'
         '<details style="margin-top:12px"><summary>Paste a link instead</summary>'
         '<form method="post" action="/manual-video/link">' + campaign +
-        '<label>Video link</label><input type="url" name="url" placeholder="https://">' + count + seconds + notes + review + names +
+        '<label>Video link</label><input type="url" name="url" placeholder="https://">' + count + seconds + notes + caption + review + names +
         '<button class="primary" style="margin-top:10px">Add video</button></form></details>'
         + UPLOAD_JS + '</section>')
 
@@ -1695,6 +1698,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                               "count": manual.clean_count(form.get("count", "")),
                               "notes": manual.clean_notes(form.get("notes", "")),
                               "seconds": manual.clean_seconds(form.get("seconds", "")),
+                              "caption": manual.clean_captions(form.get("caption", "")),
                               "review": form.get("review") == "on"})
             return self._redirect("/?" + urlencode({"notice": start_now(conn, settings, "Video added.")}))
 
@@ -1734,6 +1738,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                                 "count": manual.clean_count(query.get("count", "")),
                                 "notes": manual.clean_notes(query.get("notes", "")),
                                 "seconds": manual.clean_seconds(query.get("seconds", "")),
+                                "caption": manual.clean_captions(query.get("caption", "")),
                                 "review": query.get("review") == "1"})
                             queued = manual.queue(conn)[-1]
                             if queued["kind"] == "file":  # a single video is cut into clips, not combined
@@ -1753,6 +1758,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                                   "count": manual.clean_count(query.get("count", "")),
                                   "notes": manual.clean_notes(query.get("notes", "")),
                                   "seconds": manual.clean_seconds(query.get("seconds", "")),
+                                  "caption": manual.clean_captions(query.get("caption", "")),
                                   "review": query.get("review") == "1"})
                 message = start_now(conn, settings, "Video uploaded.")
             finally:

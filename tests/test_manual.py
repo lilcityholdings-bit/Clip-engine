@@ -301,14 +301,54 @@ def test_silent_footage_is_cut_by_picture_when_captions_are_approved(tmp_path, m
     assert all(r["title"] == caps[0] == r["description"] for r in rows)
 
 
-def test_silent_footage_without_approved_captions_is_skipped(tmp_path, monkeypatch):
+def _silent(conn, tmp_path, monkeypatch, extra=None):
+    from clip_engine import ai
+    monkeypatch.setattr(media, "has_audio", lambda v: False)
+    monkeypatch.setattr(media, "scene_cuts", lambda v: [30.0, 60.0, 90.0, 120.0])
+    monkeypatch.setattr(media, "frame_at", lambda v, out, at: b"jpeg")
+    item = manual.pop(conn)
+    manual.add(conn, {**item, "count": 2, **(extra or {})})
+    return ai
+
+
+def test_silent_footage_gets_captions_from_claude_when_you_do_not_write_one(tmp_path, monkeypatch):
     from clip_engine.config import Settings
     from tests.test_core import FakePub
 
     conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["unused"])
-    monkeypatch.setattr(media, "has_audio", lambda v: False)
+    ai = _silent(conn, tmp_path, monkeypatch, {"notes": "show the product"})
+    seen = {}
+    monkeypatch.setattr(ai, "caption_from_frames", lambda c, frames, brief, notes="": (
+        seen.update(n=len(frames), notes=notes), ["A look at the product", "Close up of the box and the cable"][:len(frames)])[1])
     pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
-    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 0
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 2
+    titles = [r[0] for r in conn.execute("SELECT title FROM clips ORDER BY id")]
+    assert titles[0].startswith("A look at the product") and len(set(titles)) == 2
+    assert seen["n"] == 2 and seen["notes"] == "show the product"
+
+
+def test_silent_footage_uses_the_captions_you_typed_and_makes_no_more_clips_than_you_wrote(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["unused"])
+    ai = _silent(conn, tmp_path, monkeypatch, {"caption": manual.clean_captions("My own caption\n\n")})
+    monkeypatch.setattr(ai, "caption_from_frames", lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked Claude")))
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 1
+    assert conn.execute("SELECT title FROM clips").fetchone()[0] == "My own caption"
+
+
+def test_silent_footage_still_gets_clips_when_claude_cannot_caption_it(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["unused"])
+    ai = _silent(conn, tmp_path, monkeypatch)
+    monkeypatch.setattr(ai, "caption_from_frames", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 2
+    assert {r[0] for r in conn.execute("SELECT title FROM clips")} == {"Ep 1 (1)", "Ep 1 (2)"}
 
 
 def test_a_failed_run_keeps_your_upload_for_another_try(tmp_path, monkeypatch):
@@ -335,17 +375,6 @@ def test_an_uploaded_video_gets_all_of_todays_clips(tmp_path, monkeypatch):
     conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["One thing", "Another topic", "Third subject"])
     pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
     assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 3  # not capped at 2
-
-
-def test_silent_upload_without_captions_explains_itself(tmp_path, monkeypatch):
-    from clip_engine.config import Settings
-    from tests.test_core import FakePub
-
-    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["unused"])
-    monkeypatch.setattr(media, "has_audio", lambda v: False)
-    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
-    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 0
-    assert "approved captions" in db.get(conn, "produce_note")
 
 
 def test_caption_is_not_doubled_when_the_campaign_dictates_it():
