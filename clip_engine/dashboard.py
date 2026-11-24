@@ -736,8 +736,15 @@ def _posting_tools(c: dict, camp) -> str:
     out = []
     back = f'<input type="hidden" name="back" value="/clip/{c["id"]}">'
     if ready and c["has_video"]:
-        out.append(f'<div class="row"><a class="button primary" href="/media/{e(c["media_token"] or "")}.mp4?download=1" '
-                   f'download="clip-{c["id"]}.mp4">1. Download the video</a></div>')
+        video = f'/media/{e(c["media_token"] or "")}.mp4'
+        first = PLATFORM_NAMES.get(ready[0]["platform"], ready[0]["platform"])
+        # Share hands the video straight to the app (no file picker); Download is the fallback.
+        out.append(f'<button id="share-btn" class="primary" {BIG} disabled data-label="1. Share the video to {e(first)}" '
+                   f'onclick="return shareClip(\'caption-{c["id"]}\', \'{video}?download=1\')">Getting the video ready&hellip;</button>'
+                   f'<p class="muted">Tap it, then pick the app in the list that opens. You never have to find the file. '
+                   f'The caption is copied for you.</p>'
+                   f'<div class="row"><a class="button" href="{video}?download=1" download="clip-{c["id"]}.mp4">'
+                   f'Download instead</a></div>' + NEXT_JS + f'<script>prepareClip("{video}");</script>')
     if ready:
         out.append(f'<label>Caption</label><textarea id="caption-{c["id"]}" readonly>{e(c["description"])}</textarea>'
                    f'<div class="row"><button type="button" onclick="copyText(\'caption-{c["id"]}\', this)">Copy caption</button></div>')

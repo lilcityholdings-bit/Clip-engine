@@ -1691,3 +1691,14 @@ def test_refresh_views_stores_how_much_of_a_video_people_watch(tmp_path):
             return {i: 61.5 for i in ids}
     pipeline.refresh_views(conn, {"youtube": Pub()})
     assert json.loads(db.get(conn, "retention", "{}")) == {"vid1": 61.5}
+
+
+def test_a_hand_post_clip_page_has_a_share_button_so_no_file_picking_is_needed(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    cid, _ = _posted_clip(conn, tmp_path, platforms=("youtube",))
+    conn.execute("UPDATE posts SET status = 'ready', url = NULL WHERE clip_id = ?", (cid,))
+    conn.commit()
+    page = _get(f"{base}/clip/{cid}", "s3cret").read().decode()
+    assert 'id="share-btn"' in page and "Share the video to YouTube" in page and "Download instead" in page
+    assert f'prepareClip("/media/{"t" * 32}.mp4")' in page
