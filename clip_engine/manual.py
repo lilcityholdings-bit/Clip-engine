@@ -186,6 +186,66 @@ def clean_length(value: str) -> str:
     return "60" if (value or "").strip() == "60" else "30"
 
 
+def clean_notes(value: str) -> str:
+    """The owner's own instructions for how a video should be cut (kept short; control characters removed)."""
+    text = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f]", " ", value or "")).strip()
+    return text[:600]
+
+
+REDO_KEY = "redo_sources"
+REDO_DAYS = 3
+
+
+def keep_for_redo(conn: sqlite3.Connection, identifier: str, item: dict) -> None:
+    """Keep an upload (its files) for a few days so a rejected clip can be redone with new instructions."""
+    import time
+    kept = _redo(conn)
+    kept[identifier] = {"item": item, "until": time.time() + REDO_DAYS * 86400}
+    db.put(conn, REDO_KEY, json.dumps(kept))
+
+
+def _redo(conn: sqlite3.Connection) -> dict:
+    try:
+        return json.loads(db.get(conn, REDO_KEY, "{}") or "{}")
+    except ValueError:
+        return {}
+
+
+def take_for_redo(conn: sqlite3.Connection, identifier: str) -> dict | None:
+    """The kept upload for a source, removed from the store (it goes back in the queue), or None if it is gone."""
+    kept = _redo(conn)
+    entry = kept.pop(identifier, None)
+    if entry is None:
+        return None
+    db.put(conn, REDO_KEY, json.dumps(kept))
+    item = entry["item"]
+    if item.get("kind") == "file" and not Path(item["ref"]).exists():
+        return None
+    if item.get("kind") == "project" and not any(Path(f).exists() for f in item.get("files", [])):
+        return None
+    return item
+
+
+def expire_redo(conn: sqlite3.Connection) -> None:
+    """Delete kept uploads older than REDO_DAYS."""
+    import time
+    kept = _redo(conn)
+    live = {k: v for k, v in kept.items() if v.get("until", 0) > time.time()}
+    for k, v in kept.items():
+        if k not in live:
+            discard(v["item"])
+    if live != kept:
+        db.put(conn, REDO_KEY, json.dumps(live))
+
+
+def redo_files(conn: sqlite3.Connection) -> list[str]:
+    out: list[str] = []
+    for v in _redo(conn).values():
+        item = v["item"]
+        out += [item["ref"]] if item.get("kind") == "file" else item.get("files", [])
+    return out
+
+
 def clean_count(value: str) -> int:
     """How many different videos to make from a set of files: 1 to 4 (the most one upload may produce)."""
     try:

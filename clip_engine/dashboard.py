@@ -244,7 +244,7 @@ function sendVideo(form, btn) {
   const next = () => {
     const file = files[i];
     const q = new URLSearchParams({campaign: form.campaign.value, creator: form.creator.value,
-                                   title: form.title.value, length: form.length.value, count: form.count.value, review: form.review.checked ? '1' : '', name: file.name,
+                                   title: form.title.value, length: form.length.value, count: form.count.value, notes: form.notes.value, review: form.review.checked ? '1' : '', name: file.name,
                                    batch: combine ? batch : '', last: i === files.length - 1 ? '1' : ''});
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/manual-video/upload?' + q.toString());
@@ -323,6 +323,17 @@ function copyAndOpen(link, page) {
 BIG = 'style="font-size:18px;padding:14px 18px;width:100%;margin-top:8px"'
 
 
+def _redo_form(clip_id: int, back: str = "/") -> str:
+    """Reject a clip but ask for a new version with your instructions (the video is kept for 3 days)."""
+    return (f'<details style="margin-top:8px"><summary>&#9998; Redo with changes</summary>'
+            f'<form method="post" action="/clip/redo"><input type="hidden" name="id" value="{clip_id}">'
+            f'<input type="hidden" name="back" value="{back}">'
+            f'<label>What should be different? <small>(this clip is deleted and a new one is made)</small></label>'
+            f'<textarea name="notes" rows="3" maxlength="600" required placeholder="Example: start at the funny part, '
+            f'make it shorter, no talking at the start"></textarea>'
+            f'<button class="primary" style="margin-top:6px">Make a new version</button></form></details>')
+
+
 def _short_rules(campaign) -> str:
     """The two or three rules that matter while posting, in a few words."""
     if campaign is None:
@@ -371,7 +382,8 @@ def _next_task(conn, settings: Settings) -> str:
             f'<form method="post" action="/review/approve"><input type="hidden" name="id" value="{c["id"]}">'
             f'<input type="hidden" name="back" value="/"><button class="primary" {BIG}>&#128077; Yes, post it</button></form>'
             f'<form method="post" action="/review/reject"><input type="hidden" name="id" value="{c["id"]}">'
-            f'<input type="hidden" name="back" value="/"><button {BIG}>&#128078; No, delete it</button></form>'))
+            f'<input type="hidden" name="back" value="/"><button {BIG}>&#128078; No, delete it</button></form>'
+            + _redo_form(c["id"])))
 
     # 3. A clip to post from the phone
     ready = pipeline.ready_to_post(conn)
@@ -499,6 +511,9 @@ def _own_video(conn, settings: Settings) -> str:
              + '</select>')
     review = ('<label style="margin-top:8px"><input type="checkbox" name="review" checked> Let me watch each clip before it '
               'can post</label>')
+    notes = ('<label>Special instructions <small>(optional: how you want it cut or what to show)</small></label>'
+             '<textarea name="notes" rows="2" maxlength="600" placeholder="Example: use the part where he laughs, '
+             'keep it under 20 seconds, no intro"></textarea>')
     names = ('<label>Creator\'s name <small>(credited in the caption; optional)</small></label><input type="text" name="creator">'
              '<label>Title <small>(optional; the post title when the campaign has no approved captions)</small></label>'
              '<input type="text" name="title">')
@@ -506,7 +521,7 @@ def _own_video(conn, settings: Settings) -> str:
         '<section id="own-video"><h2>Add a video</h2>' + queue_html +
         '<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">' + campaign +
         f'<label>Video or photos <small>(one video is cut into clips; several files are combined)</small></label>'
-        f'<input type="file" name="file" accept="video/*,image/*" multiple>' + count +
+        f'<input type="file" name="file" accept="video/*,image/*" multiple>' + count + notes +
         '<details style="margin-top:10px"><summary>More options</summary>' + names +
         '<div class="checks" style="flex-direction:column;align-items:flex-start;margin-top:8px"><b>With several files:</b>'
         '<label><input type="radio" name="mode" value="combine" checked> <b>Combine</b> them into new videos, in a smart '
@@ -519,7 +534,7 @@ def _own_video(conn, settings: Settings) -> str:
         '<button class="primary" type="submit" style="margin-top:8px">Upload</button></form>'
         '<details style="margin-top:12px"><summary>Paste a link instead</summary>'
         '<form method="post" action="/manual-video/link">' + campaign +
-        '<label>Video link</label><input type="url" name="url" placeholder="https://">' + count + review + names +
+        '<label>Video link</label><input type="url" name="url" placeholder="https://">' + count + notes + review + names +
         '<button class="primary" style="margin-top:10px">Add video</button></form></details>'
         + UPLOAD_JS + '</section>')
 
@@ -859,6 +874,7 @@ def _clip_page(conn, settings: Settings, clip_id: int) -> str | None:
         actions.append(f'<form class="inline" method="post" action="/review/reject" onsubmit="return confirm(\'Reject '
                        f'this clip? It will be deleted.\')"><input type="hidden" name="id" value="{c["id"]}">'
                        f'<input type="hidden" name="back" value="/#clips"><button>Reject</button></form>')
+        actions.append(_redo_form(c["id"], back="/"))
     if c["state"] in ("waiting", "approved"):
         actions.append(_delete_form(c["id"], back="/#clips"))
     posting = _posting_tools(c, camp)
@@ -914,7 +930,7 @@ def _review(conn, settings: Settings) -> str:
             f'<div class="row" style="margin-top:8px">'
             f'<form class="inline" method="post" action="/review/reject" onsubmit="return confirm(\'Reject this clip? It will '
             f'be deleted.\')"><input type="hidden" name="id" value="{c["id"]}"><button>Reject</button></form>'
-            f'{_delete_form(c["id"])}</div></div>')
+            f'{_delete_form(c["id"])}</div>{_redo_form(c["id"])}</div>')
     approve_all = ('<form method="post" action="/review/approve-all" style="margin-top:10px"><button>Approve all '
                    f'{len(waiting)}</button></form>' if len(waiting) > 1 else "")
     return (f'<section id="review"><h2>Waiting for your approval ({len(waiting)})</h2>'
@@ -1586,6 +1602,12 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                     pipeline.delete_clip_video(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/clip/delete":
                     pipeline.delete_clip(conn, int(self._form().get("id", ["0"])[0] or 0))
+                elif self.path == "/clip/redo":
+                    form = self._form()
+                    note = pipeline.redo(conn, int(form.get("id", ["0"])[0] or 0), form.get("notes", [""])[0])
+                    if note.startswith("Got it"):
+                        note = start_now(conn, settings, note)
+                    return self._redirect("/?" + urlencode({"notice": note}))
                 elif self.path == "/review/reject":
                     pipeline.reject(conn, int(self._form().get("id", ["0"])[0] or 0))
                 elif self.path == "/manual-video/link":
@@ -1663,6 +1685,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                               "creator": manual.clean_text(form.get("creator", "")),
                               "title": manual.clean_text(form.get("title", "")),
                               "count": manual.clean_count(form.get("count", "")),
+                              "notes": manual.clean_notes(form.get("notes", "")),
                               "review": form.get("review") == "on"})
             return self._redirect("/?" + urlencode({"notice": start_now(conn, settings, "Video added.")}))
 
@@ -1700,6 +1723,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                                 "title": manual.clean_text(query.get("title", "")),
                                 "length": manual.clean_length(query.get("length", "")),
                                 "count": manual.clean_count(query.get("count", "")),
+                                "notes": manual.clean_notes(query.get("notes", "")),
                                 "review": query.get("review") == "1"})
                             queued = manual.queue(conn)[-1]
                             if queued["kind"] == "file":  # a single video is cut into clips, not combined
@@ -1717,6 +1741,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
                                   "creator": manual.clean_text(query.get("creator", "")),
                                   "title": manual.clean_text(query.get("title", "")) or Path(query["name"]).stem[:60],
                                   "count": manual.clean_count(query.get("count", "")),
+                                  "notes": manual.clean_notes(query.get("notes", "")),
                                   "review": query.get("review") == "1"})
                 message = start_now(conn, settings, "Video uploaded.")
             finally:

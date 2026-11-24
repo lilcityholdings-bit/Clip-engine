@@ -150,6 +150,15 @@ def campaign_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
     return None
 
 
+def _with_notes(rules: str, notes: str) -> str:
+    """The campaign's rules plus the owner's own instructions for this video, which Claude must follow."""
+    if not notes:
+        return rules
+    mine = (f"The owner's own instructions for this video (follow them, as long as they don't break the rules "
+            f"above): {notes}")
+    return f"{rules}\n\n{mine}" if rules else mine
+
+
 def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
                music: list[str] | None = None, claude: anthropic.Anthropic | None = None) -> Job | None:
     """The oldest video you handed over (uploaded or by link) whose campaign is still live."""
@@ -173,7 +182,7 @@ def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
                     creator=item.get("creator") or campaign.name, license_url=campaign.program_url,
                     video_url=str(path), duration=media.duration(path), page=campaign.program_url)
             else:
-                if _seen(conn, item["ref"]) or policy.watermarked(item["ref"]):
+                if (_seen(conn, item["ref"]) and not item.get("redo")) or policy.watermarked(item["ref"]):
                     log.info("dropping %s: already clipped or watermarked", item["ref"])
                     continue
                 src = campaigns.describe(campaign, item["ref"])
@@ -209,16 +218,16 @@ def _build_project(item: dict, campaign: campaigns.Campaign, claude: anthropic.A
     out = files[0].parent / f"{stem}-combined.mp4"
     try:
         if count > 1:
-            groups = arrange_groups(claude, files, campaign, work, count, base)
+            groups = arrange_groups(claude, files, campaign, work, count, base, item.get("notes", ""))
             built, windows = media.assemble_many([g for g, _ in groups], out, work, budget)
             titles = [t for _, t in groups]
         else:
             title = base
             if claude is not None and len(files) > 1:
                 if item.get("title"):
-                    files = arrange(claude, files, campaign, work)
+                    files = arrange(claude, files, campaign, work, item.get("notes", ""))
                 else:  # no title typed: Claude orders the files and writes the caption in one go
-                    [(files, title)] = arrange_groups(claude, files, campaign, work, 1, base)[:1]
+                    [(files, title)] = arrange_groups(claude, files, campaign, work, 1, base, item.get("notes", ""))[:1]
             built = media.assemble(files, out, work, budget)
             windows, titles = [(0.0, media.duration(built))], [title]
     finally:
@@ -243,7 +252,7 @@ def split_evenly(weights: list[float], count: int) -> list[list[int]]:
 
 
 def arrange_groups(claude: anthropic.Anthropic | None, files: list[Path], campaign: campaigns.Campaign, work: Path,
-                   count: int, base: str) -> list[tuple[list[Path], str]]:
+                   count: int, base: str, notes: str = "") -> list[tuple[list[Path], str]]:
     """Split the files into `count` different videos, each with a caption: Claude looks at a frame of each file
     and decides the split, the order and the captions. Any problem: an even split in upload order, captioned
     "<title> 1", "<title> 2" ..."""
@@ -259,7 +268,7 @@ def arrange_groups(claude: anthropic.Anthropic | None, files: list[Path], campai
             photo = manual.is_image(f)
             label = "photo" if photo else f"video, {media.duration(f):.0f} seconds"
             pieces.append((label, media.thumbnail(f, work / f"thumb{i}.jpg", photo)))
-        brief = "; ".join(x for x in (campaign.name, campaign.niche, campaign.rules) if x)
+        brief = "; ".join(x for x in (campaign.name, campaign.niche, campaign.rules, notes and f"owner's instructions: {notes}") if x)
         result = ai.plan_videos(claude, pieces, brief, count)
         used: set[int] = set()
         groups: list[tuple[list[Path], str]] = []
@@ -281,7 +290,8 @@ def arrange_groups(claude: anthropic.Anthropic | None, files: list[Path], campai
         return even
 
 
-def arrange(claude: anthropic.Anthropic, files: list[Path], campaign: campaigns.Campaign, work: Path) -> list[Path]:
+def arrange(claude: anthropic.Anthropic, files: list[Path], campaign: campaigns.Campaign, work: Path,
+            notes: str = "") -> list[Path]:
     """Claude looks at a frame of each file, picks the order, and leaves out unusable ones (blurry,
     duplicate, watermarked). Any problem: keep the upload order, so a video is always made."""
     try:
@@ -291,7 +301,7 @@ def arrange(claude: anthropic.Anthropic, files: list[Path], campaign: campaigns.
             photo = manual.is_image(f)
             label = "photo" if photo else f"video, {media.duration(f):.0f} seconds"
             pieces.append((label, media.thumbnail(f, work / f"thumb{i}.jpg", photo)))
-        brief = "; ".join(x for x in (campaign.name, campaign.niche, campaign.rules) if x)
+        brief = "; ".join(x for x in (campaign.name, campaign.niche, campaign.rules, notes and f"owner's instructions: {notes}") if x)
         result = ai.arrange_pieces(claude, pieces, brief)
         order = list(dict.fromkeys(i for i in result.get("order", []) if isinstance(i, int) and 0 <= i < len(files)))
         if not order:
@@ -568,6 +578,26 @@ def reject(conn: sqlite3.Connection, clip_id: int) -> None:
     cleanup_files(conn)
 
 
+def redo(conn: sqlite3.Connection, clip_id: int, notes: str) -> str:
+    """Reject a clip that hasn't been posted and queue its video again with the owner's changes. Returns a message
+    for the owner; the clip is only rejected when the original video is still here to make a new one from."""
+    notes = manual.clean_notes(notes)
+    if not notes:
+        return "Say what you want changed first."
+    row = conn.execute("SELECT source_identifier, title, start_sec, end_sec FROM clips WHERE id = ?", (clip_id,)).fetchone()
+    if row is None:
+        return "That clip is gone."
+    item = manual.take_for_redo(conn, row["source_identifier"])
+    if item is None:
+        return "The original video is no longer saved (it is kept for 3 days). Upload it again with your instructions."
+    earlier = (f" (an earlier version of this started at {row['start_sec']:.0f}s and ended at {row['end_sec']:.0f}s "
+               f"and was rejected)" if item.get("kind") != "project" else " (an earlier version was rejected)")
+    manual.add(conn, {**item, "count": 1, "review": True, "redo": True, "attempts": 0,
+                      "notes": manual.clean_notes(f"{notes}{earlier}")})
+    delete_clip(conn, clip_id)
+    return "Got it. A new version is being made with your changes."
+
+
 def snap_to_words(clip: dict, words: list[dict]) -> dict:
     """Start exactly on the first spoken word and end just after the last, so there's no dead air."""
     inside = [w for w in words if w["start"] >= clip["start"] - 0.3 and w["end"] <= clip["end"] + 0.3]
@@ -711,7 +741,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             clips = ai.pick_clips(
                 claude, segments, source_title=src.title, fmt=arms["format"],
                 min_sec=lo, max_sec=hi, title_style=arms["title_style"], count=remaining,
-                rules=caption_rules(campaign),
+                rules=_with_notes(caption_rules(campaign), (job.item or {}).get("notes", "")),
                 track_record=track_record(conn),
                 recent_titles=recent,
                 trends=trends.as_prompt(trends.brief(conn, claude, niche_of(campaign, arms), settings.trend_region)),
@@ -807,7 +837,9 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             Path(src.video_url).unlink(missing_ok=True)  # the combined copy; your own files are kept for a retry
         if job.item and job.item.get("kind") in ("file", "project"):
             attempts = job.item.get("attempts", 0) + 1
-            if finished or queued or attempts >= MAX_UPLOAD_ATTEMPTS:
+            if (finished or queued) and job.item.get("review") and queued:
+                manual.keep_for_redo(conn, src.identifier, {**job.item, "redo": False, "attempts": 0})  # a few days
+            elif finished or queued or attempts >= MAX_UPLOAD_ATTEMPTS:
                 manual.discard(job.item)  # used (or given up on): free the disk
             else:  # it failed part-way: keep your upload and try it again on the next run
                 manual.add(conn, {**job.item, "attempts": attempts}, front=True)
@@ -927,7 +959,8 @@ def cleanup_orphans(conn: sqlite3.Connection, settings: Settings, now: float | N
     to. Files newer than ORPHAN_HOURS are left alone. Returns how many were removed."""
     import time as _time
     cutoff = (now or _time.time()) - ORPHAN_HOURS * 3600
-    keep: set[Path] = set()
+    manual.expire_redo(conn)
+    keep: set[Path] = {Path(f).resolve() for f in manual.redo_files(conn)}
     inflight = db.get(conn, manual.INFLIGHT_KEY, "")
     for item in manual.queue(conn) + ([json.loads(inflight)] if inflight else []):
         for ref in ([item["ref"]] if item.get("kind") == "file" else item.get("files", [])):

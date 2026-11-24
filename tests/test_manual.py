@@ -3,6 +3,7 @@ import io
 import json
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -1702,3 +1703,66 @@ def test_a_hand_post_clip_page_has_a_share_button_so_no_file_picking_is_needed(s
     page = _get(f"{base}/clip/{cid}", "s3cret").read().decode()
     assert 'id="share-btn"' in page and "Share the video to YouTube" in page and "Download instead" in page
     assert f'prepareClip("/media/{"t" * 32}.mp4")' in page
+
+
+def _sent_prompt(claude) -> str:
+    call = claude.beta.messages.create.call_args
+    return json.dumps(call.kwargs.get("messages", call.args))
+
+
+def test_your_instructions_reach_claude_when_it_chooses_the_clips(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["A good clip"])
+    item = manual.pop(conn)
+    manual.add(conn, {**item, "count": 1, "notes": manual.clean_notes("start at the funny part\n\nkeep it short")})
+    pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}, 2)
+    assert "start at the funny part keep it short" in _sent_prompt(claude)
+    assert manual.clean_notes("x" * 900) == "x" * 600
+
+
+def test_a_rejected_clip_can_be_redone_with_new_instructions_while_its_video_is_kept(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["First try"])
+    item = manual.pop(conn)
+    manual.add(conn, {**item, "count": 1, "review": True})
+    video = Path(item["ref"])
+    pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}, 2)
+    assert video.exists()  # kept so the clip can be redone
+    cid = conn.execute("SELECT id FROM clips").fetchone()[0]
+    assert pipeline.redo(conn, cid, "  ") == "Say what you want changed first."
+    assert pipeline.redo(conn, cid, "make it shorter and start on the joke").startswith("Got it")
+    assert {r[0] for r in conn.execute("SELECT status FROM posts WHERE clip_id = ?", (cid,))} == {"rejected"}
+    [queued] = manual.queue(conn)
+    assert queued["ref"] == str(video) and queued["count"] == 1 and queued["review"] and queued["redo"]
+    assert "make it shorter and start on the joke" in queued["notes"] and "was rejected" in queued["notes"]
+    # the kept copy is now in the queue; asking again for the same clip finds nothing saved
+    assert pipeline.redo(conn, cid, "again").startswith("The original video is no longer saved")
+
+
+def test_kept_uploads_are_deleted_after_three_days(tmp_path):
+    conn = db.connect(tmp_path / "k.db")
+    f = tmp_path / "up.mp4"
+    f.write_bytes(b"v")
+    manual.keep_for_redo(conn, "upload:up", {"kind": "file", "ref": str(f), "campaign_id": "pod"})
+    manual.expire_redo(conn)
+    assert f.exists() and manual.redo_files(conn) == [str(f)]
+    kept = json.loads(db.get(conn, manual.REDO_KEY))
+    kept["upload:up"]["until"] = 1.0
+    db.put(conn, manual.REDO_KEY, json.dumps(kept))
+    manual.expire_redo(conn)
+    assert not f.exists() and manual.redo_files(conn) == []
+
+
+def test_review_cards_offer_redo_with_changes(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    cid, _ = _posted_clip(conn, tmp_path, platforms=("tiktok",))
+    conn.execute("UPDATE posts SET status = 'review', url = NULL WHERE clip_id = ?", (cid,))
+    conn.commit()
+    assert "Redo with changes" in _get(base + "/", "s3cret").read().decode()
+    assert "Redo with changes" in _get(f"{base}/clip/{cid}", "s3cret").read().decode()
+    assert 'name="notes"' in _get(base + "/", "s3cret").read().decode()

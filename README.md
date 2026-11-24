@@ -200,3 +200,13 @@ python -m pytest                         # tests
 - Captions use wide side margins so they stay off the screen edges and TikTok/Reels buttons.
 - YouTube watch-through (average % of the clip watched) is read hourly and shown on each clip's Clip status.
   TikTok and Instagram don't give this to apps; read it in each app's analytics.
+
+## Your own instructions for a clip
+
+- **Before:** the Add a video form (and the link form) has **Special instructions**, e.g. "use the part where he laughs,
+  keep it under 20 seconds, no intro". Up to 600 characters. Claude is told to follow them when choosing the moments
+  (or, for photos and several videos, the order and split), as long as they don't break the campaign's rules.
+- **After:** every clip waiting for approval has **Redo with changes**. Say what should be different; that clip is deleted and
+  one new version is made from the same video, with your words added. To make this possible an upload that is set to
+  "Let me watch each clip" is kept for **3 days** (`manual.REDO_DAYS`) and then deleted by the daily cleanup; after that the
+  button says to upload the video again. Redo makes one new clip each time and still shows it for approval.
