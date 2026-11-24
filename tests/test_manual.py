@@ -1822,3 +1822,12 @@ def test_a_redo_can_change_only_the_length(tmp_path, monkeypatch):
     assert pipeline.redo(conn, cid, "", "10-20").startswith("Got it")
     [queued] = manual.queue(conn)
     assert queued["seconds"] == "10-20" and "10 to 20 seconds" in queued["notes"]
+
+
+def test_a_clip_page_can_save_the_video_to_the_gallery_through_the_share_list(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    cid, _ = _posted_clip(conn, tmp_path, platforms=("tiktok",))
+    page = _get(f"{base}/clip/{cid}", "s3cret").read().decode()
+    assert "Save to my gallery / Google Photos" in page and f'prepareSave("/media/{"t" * 32}.mp4"' in page
+    assert "Download</a>" in page

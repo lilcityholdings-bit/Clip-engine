@@ -322,6 +322,27 @@ function copyAndOpen(link, page) {
 }
 </script>"""
 
+# "Save to my gallery": a web page can't choose where a download goes (phones put it in Downloads), but the phone's
+# Share list has Save to device / Google Photos, which puts it in the gallery.
+SAVE_JS = """<script>
+var saveFile = null;
+function prepareSave(url, name) {
+  fetch(url).then(function (r) { return r.blob(); }).then(function (b) {
+    saveFile = new File([b], name, {type: 'video/mp4'});
+  }).catch(function () {});
+}
+function saveClip(url, name) {
+  if (saveFile && navigator.canShare && navigator.canShare({files: [saveFile]})) {
+    navigator.share({files: [saveFile]}).catch(function () {});
+  } else if (!saveFile) {
+    alert('Still getting the video ready. Wait a few seconds and tap again.');
+  } else {
+    location.href = url + '?download=1';  // this phone can't share files: it goes to Downloads instead
+  }
+  return false;
+}
+</script>"""
+
 BIG = 'style="font-size:18px;padding:14px 18px;width:100%;margin-top:8px"'
 
 
@@ -872,6 +893,9 @@ def _clip_page(conn, settings: Settings, clip_id: int) -> str | None:
         where.append(f'<li><b>{e(PLATFORM_NAMES.get(p["platform"], p["platform"]))}</b>: {e(label)}{when}{link}</li>')
     actions = []
     if c["has_video"]:
+        actions.append(f'<button type="button" onclick="return saveClip(\'/media/{token}.mp4\', \'clip-{c["id"]}.mp4\')">'
+                       f'Save to my gallery / Google Photos</button>' + SAVE_JS
+                       + f'<script>prepareSave("/media/{token}.mp4", "clip-{c["id"]}.mp4");</script>')
         actions.append(f'<a class="button" href="/media/{token}.mp4?download=1" download="clip-{c["id"]}.mp4">Download</a>')
     review = [p for p in c["posts"] if p["status"] == "review"]
     if review:

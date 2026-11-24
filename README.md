@@ -220,3 +220,6 @@ python -m pytest                         # tests
   instructions; if Claude fails, the caption is the video's title with a number). Campaigns with approved captions still use
   those. The length picker does not apply to these cuts, which follow the shot changes (up to 58 s). Captions from pictures
   alone can be wrong, so keep "Let me watch each clip" ticked.
+- **Saving a finished clip to the gallery:** a web page cannot choose where a download goes (phones put it in Downloads).
+  Each clip's page has **Save to my gallery / Google Photos**, which opens the phone's Share list so you can pick Photos
+  or Save to device. If the phone can't share files it downloads to Downloads, as the plain **Download** button does.
