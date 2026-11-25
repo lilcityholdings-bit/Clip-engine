@@ -1831,3 +1831,31 @@ def test_a_clip_page_can_save_the_video_to_the_gallery_through_the_share_list(se
     page = _get(f"{base}/clip/{cid}", "s3cret").read().decode()
     assert "Save to my gallery / Google Photos" in page and f'prepareSave("/media/{"t" * 32}.mp4"' in page
     assert "Download</a>" in page
+
+
+def test_you_can_step_through_the_clips_waiting_for_you(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    ids = []
+    for n in range(3):
+        cid, _ = _posted_clip(conn, tmp_path, platforms=("tiktok",))
+        conn.execute("UPDATE clips SET title = ?, media_token = ? WHERE id = ?", (f"Clip number {n + 1}", f"{n:x}" * 32, cid))
+        conn.execute("UPDATE posts SET status = 'review', url = NULL WHERE clip_id = ?", (cid,))
+        ids.append(cid)
+    conn.commit()
+
+    def card(path):
+        return _get(base + path, "s3cret").read().decode().split('id="next"')[1].split("</section>")[0]
+    first = card("/")  # the oldest first
+    assert "1 of 3" in first and "/?n=2#next" in first and "Previous</span>" in first
+    mid = card("/?n=2")
+    assert "2 of 3" in mid and "/?n=1#next" in mid and "/?n=3#next" in mid
+    last = card("/?n=3")
+    assert "3 of 3" in last and "Next &#8250;</span>" in last
+    assert "3 of 3" in card("/?n=99") and "1 of 3" in card("/?n=abc") and "1 of 3" in card("/?n=0")
+    assert mid != first != last
+    conn.execute("UPDATE posts SET status = 'ready' WHERE clip_id IN (?, ?)", ids[:2])  # now two to post, one to review
+    conn.commit()
+    conn.execute("UPDATE posts SET status = 'ready' WHERE clip_id = ?", (ids[2],))
+    conn.commit()
+    assert "2 of 3" in card("/?n=2") and "Share to TikTok" in card("/?n=2")

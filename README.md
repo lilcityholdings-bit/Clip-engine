@@ -223,3 +223,6 @@ python -m pytest                         # tests
 - **Saving a finished clip to the gallery:** a web page cannot choose where a download goes (phones put it in Downloads).
   Each clip's page has **Save to my gallery / Google Photos**, which opens the phone's Share list so you can pick Photos
   or Save to device. If the phone can't share files it downloads to Downloads, as the plain **Download** button does.
+- **Stepping through waiting clips:** the "Do this next" card (clips to approve, and clips to post by hand) has
+  **‹ Previous / 2 of 5 / Next ›** links when more than one clip is waiting (`/?n=2`). Approving, skipping or posting a
+  clip returns to the first one.

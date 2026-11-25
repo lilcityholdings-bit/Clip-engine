@@ -276,7 +276,7 @@ REFRESH_JS = """<script>
 setInterval(function () {
   var el = document.activeElement, busy = el && ['INPUT', 'TEXTAREA', 'SELECT'].indexOf(el.tagName) >= 0;
   var playing = Array.prototype.some.call(document.querySelectorAll('video'), function (v) { return !v.paused; });
-  if (!busy && !playing && !window.uploading) location.replace(location.pathname);
+  if (!busy && !playing && !window.uploading) location.replace(location.pathname + location.search);
 }, 20000);
 </script>"""
 
@@ -375,8 +375,20 @@ def _short_rules(campaign) -> str:
     return " &middot; ".join(rules) + "."
 
 
-def _next_task(conn, settings: Settings) -> str:
-    """The single next thing to do, with big buttons."""
+def _pager(pick: int, total: int) -> str:
+    """Previous / Next links to look through the clips waiting for you (nothing for a single clip)."""
+    if total < 2:
+        return ""
+    prev = (f'<a class="button" href="/?n={pick}#next">&#8249; Previous</a>' if pick > 0
+            else '<span class="button muted" style="opacity:.4">&#8249; Previous</span>')
+    nxt = (f'<a class="button" href="/?n={pick + 2}#next">Next &#8250;</a>' if pick < total - 1
+           else '<span class="button muted" style="opacity:.4">Next &#8250;</span>')
+    return (f'<div class="row" style="justify-content:space-between;align-items:center;margin:8px 0">{prev}'
+            f'<b>{pick + 1} of {total}</b>{nxt}</div>')
+
+
+def _next_task(conn, settings: Settings, pick: int = 0) -> str:
+    """The single next thing to do, with big buttons. `pick` is which waiting clip to show (0 is the first)."""
     e = html.escape
     camps = campaigns.by_id(campaigns.load(settings.data_dir))
 
@@ -402,9 +414,10 @@ def _next_task(conn, settings: Settings) -> str:
     # 2. A clip to check
     waiting = pipeline.awaiting_review(conn)
     if waiting:
-        c = waiting[0]
-        more = f' <span class="muted">({len(waiting) - 1} more after this)</span>' if len(waiting) > 1 else ""
-        return card(f"Do you want to post this clip?{more}", (
+        pick = max(0, min(pick, len(waiting) - 1))
+        c = waiting[pick]
+        return card("Do you want to post this clip?", (
+            _pager(pick, len(waiting)) +
             f'<video controls playsinline preload="metadata" style="width:100%;max-height:60vh;background:#000" '
             f'src="/media/{e(c["media_token"])}.mp4"></video>'
             f'<p><b>{e(c["title"])}</b></p>'
@@ -417,13 +430,15 @@ def _next_task(conn, settings: Settings) -> str:
     # 3. A clip to post from the phone
     ready = pipeline.ready_to_post(conn)
     if ready:
-        c = ready[0]
+        pick = max(0, min(pick, len(ready) - 1))
+        c = ready[pick]
         p = c["posts"][0]
         name = PLATFORM_NAMES.get(p["platform"], p["platform"])
         camp = camps.get(c["campaign_id"])
         video = f'/media/{e(c["media_token"])}.mp4'
         rules = _short_rules(camp)
         return card(f"Post this clip on {e(name)}", (
+            _pager(pick, len(ready)) +
             f'<video controls playsinline preload="metadata" style="width:100%;max-height:45vh;background:#000" src="{video}"></video>'
             f'<textarea id="next-caption" readonly style="display:none">{e(c["description"])}</textarea>'
             f'<button id="share-btn" class="primary" {BIG} disabled data-label="1. Share to {e(name)}" '
@@ -1245,7 +1260,7 @@ def _settings(conn, settings: Settings) -> str:
 
 
 def render(conn, settings: Settings, notice: str = "", error: str = "", form_values: dict | None = None,
-           edit_id: str = "") -> str:
+           edit_id: str = "", pick: int = 0) -> str:
     e = html.escape
     paused = db.get(conn, "paused") == "1"
     earn = pipeline.earnings(conn, settings)
@@ -1296,7 +1311,7 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
                                      open_form=bool(form_values) or not campaigns.load(settings.data_dir)),
         status=_status(conn),
         todo=_todo(conn, settings),
-        next=_next_task(conn, settings),
+        next=_next_task(conn, settings, pick),
         state="paused" if paused else "running", state_class="bad" if paused else "good",
         earned=f"{sum(r['estimated_usd'] for r in earn):,.2f}", views=f"{totals['views']:,}",
         posted=totals["posted"] or 0, queued=totals["queued"] or 0,
@@ -1442,7 +1457,12 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
             if not self._authorized():
                 return self._deny()
             query = {k: v[0] for k, v in parse_qs(url.query).items()}
-            self._page(notice=query.get("notice", ""), error=query.get("error", ""), edit_id=query.get("edit", ""))
+            try:
+                pick = max(0, int(query.get("n", "1")) - 1)  # "n" counts from 1 in the address
+            except ValueError:
+                pick = 0
+            self._page(notice=query.get("notice", ""), error=query.get("error", ""), edit_id=query.get("edit", ""),
+                       pick=pick)
 
         def _youtube_disconnect(self, conn) -> None:
             """Cancel the saved login at Google, forget it and stop automatic YouTube posting."""
