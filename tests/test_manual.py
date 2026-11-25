@@ -79,12 +79,14 @@ def test_manual_link_goes_through_yt_dlp_describe(tmp_path, monkeypatch):
     assert pipeline.manual_job(conn, [camp], []) is None  # watermarked sources are skipped
 
 
-def test_dashboard_card_appears_only_with_a_live_campaign(server, tmp_path):
+def test_dashboard_add_a_video_card_is_always_there_and_offers_my_own_clips(server, tmp_path):
     base, _ = server
-    assert 'id="own-video"' not in _get(base + "/", "s3cret").read().decode()
+    page = _get(base + "/", "s3cret").read().decode()
+    assert 'id="own-video"' in page and "My own clips (no campaign)" in page and "+ Add a campaign" in page
+    assert "Pod Show" not in page
     _campaign(tmp_path)
     page = _get(base + "/", "s3cret").read().decode()
-    assert 'id="own-video"' in page and "Add a video" in page and "Pod Show" in page
+    assert "Add a video" in page and "Pod Show" in page and "My own clips (no campaign)" in page
 
 
 def test_dashboard_upload_and_link_routes(server, tmp_path, monkeypatch):
@@ -1859,3 +1861,31 @@ def test_you_can_step_through_the_clips_waiting_for_you(server, tmp_path):
     conn.execute("UPDATE posts SET status = 'ready' WHERE clip_id = ?", (ids[2],))
     conn.commit()
     assert "2 of 3" in card("/?n=2") and "Share to TikTok" in card("/?n=2")
+
+
+def test_a_clip_made_as_my_own_clips_has_no_campaign_no_paid_label_and_no_link_to_submit(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["Plain clip of my own"])
+    item = manual.pop(conn)
+    for c in campaigns.load(tmp_path):  # no campaign exists at all
+        campaigns.remove(tmp_path, c.id)
+    manual.add(conn, {**item, "campaign_id": campaigns.OWN_ID, "count": 1})
+    assert campaigns.load(tmp_path) == []
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None,
+                            {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}, 2) == 1
+    row = conn.execute("SELECT campaign_id, description FROM clips").fetchone()
+    assert row["campaign_id"] is None
+    assert "#ad" not in row["description"].lower() and "Paid clip" not in row["description"] and "program" not in row["description"]
+    assert pipeline.pending_submissions(conn) == []
+    prompt = _sent_prompt(claude)
+    assert "My own clips" not in prompt
+
+
+def test_my_own_clips_cannot_be_edited_paused_or_deleted(server, tmp_path):
+    base, _ = server
+    for path in ("/campaigns/toggle", "/campaigns/delete"):
+        with pytest.raises(urllib.error.HTTPError):
+            _get(base + path, "s3cret", data=b"id=_own")
+    assert not (tmp_path / "campaigns.json").exists() or "_own" not in (tmp_path / "campaigns.json").read_text()

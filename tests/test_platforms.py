@@ -366,15 +366,15 @@ def test_posts_from_other_sites_are_rejected(server, tmp_path):
     assert campaigns.load(tmp_path) == []
 
 
-def test_env_campaigns_show_but_cannot_be_deleted(server, tmp_path, monkeypatch):
+def test_env_campaigns_can_be_deleted_and_stay_gone(server, tmp_path, monkeypatch):
     monkeypatch.setenv("CAMPAIGNS_JSON", '[{"id": "envpod", "name": "Env Pod", "program_url": "https://w.example",'
                                          ' "rate_per_1k_views": 1, "sources": ["https://y.example"]}]')
     base, _ = server
     page = _get(base + "/", "s3cret").read().decode()
-    assert "Env Pod" in page and "/campaigns/delete" not in page
-    with pytest.raises(urllib.error.HTTPError):
-        _get(base + "/campaigns/delete", "s3cret", data=b"id=envpod")
-    assert [c.id for c in campaigns.load(tmp_path)] == ["envpod"]
+    assert "Env Pod" in page and "/campaigns/delete" in page
+    _get(base + "/campaigns/delete", "s3cret", data=b"id=envpod")
+    assert campaigns.load(tmp_path) == []  # the setting still lists it, but it is hidden for good
+    assert "Env Pod" not in _get(base + "/", "s3cret").read().decode()
 
 
 def html_unescape(text):

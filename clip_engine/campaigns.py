@@ -64,8 +64,14 @@ class Campaign:
     submit_within_minutes: int = 0  # the program only accepts a link submitted this soon after posting (0: no limit)
     keep_live_days: int = 0         # posts must stay up this long (0: not stated)
     disclosure_line: str = ""  # e.g. "#Ad": the caption is the text, then this alone on the next line, then at most 2 hashtags
+    personal: bool = False  # the built-in "My own clips": no campaign, no payment, no disclosure, no links to submit
     active: bool = True
     ends_on: str | None = None
+
+    @property
+    def label(self) -> str:
+        """The name to show Claude and use in titles: nothing for your own clips, which have no campaign."""
+        return "" if self.personal else self.name
 
     def is_live(self, today: date | None = None) -> bool:
         today = today or date.today()
@@ -73,6 +79,12 @@ class Campaign:
 
 
 PLATFORMS = ("youtube", "tiktok", "instagram")
+
+
+# For clips that belong to no campaign. Never saved to the file; clips made with it are stored without a campaign.
+OWN_ID = "_own"
+OWN = Campaign(id=OWN_ID, name="My own clips (no campaign)", program_url="", rate_per_1k_views=0.0, sources=[],
+               paid_label=False, personal=True)
 
 
 def _from_env() -> list[Campaign]:
@@ -89,8 +101,17 @@ def load(data_dir: Path) -> list[Campaign]:
     """Campaigns added from the dashboard (campaigns.json in DATA_DIR) plus any set in CAMPAIGNS_JSON.
     A dashboard campaign with the same id replaces the environment one."""
     saved = _from_file(data_dir)
-    ids = {c.id for c in saved}
+    ids = {c.id for c in saved} | removed_env_ids(data_dir)
     return saved + [c for c in _from_env() if c.id not in ids]
+
+
+def removed_env_ids(data_dir: Path) -> set[str]:
+    """Campaigns from CAMPAIGNS_JSON that the owner deleted in the dashboard (the setting itself can't be edited here)."""
+    path = data_dir / "removed-campaigns.json"
+    try:
+        return set(json.loads(path.read_text())) if path.exists() else set()
+    except ValueError:
+        return set()
 
 
 def env_ids() -> set[str]:
@@ -105,7 +126,12 @@ def save(data_dir: Path, campaign: Campaign) -> None:
 
 
 def remove(data_dir: Path, campaign_id: str) -> None:
+    if campaign_id == OWN_ID:
+        return
     _write(data_dir, [c for c in _from_file(data_dir) if c.id != campaign_id])
+    if campaign_id in env_ids():  # defined in the CAMPAIGNS_JSON setting: hide it instead
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "removed-campaigns.json").write_text(json.dumps(sorted(removed_env_ids(data_dir) | {campaign_id})))
 
 
 def _write(data_dir: Path, campaigns: list[Campaign]) -> None:
@@ -296,6 +322,9 @@ def download(video_url: str, dest: Path) -> Path:
 
 
 def caption_lines(campaign: Campaign, src: Source, fmt: str) -> str:
+    if campaign.personal:  # your own clips: no paid-clip disclosure; a credit only when you named a creator
+        lines = [f"Clip from {src.creator}" + (f": {src.page_url}" if src.page_url else "")] if src.creator else []
+        return "\n".join(lines + (["#Shorts"] if fmt == "short" else []))
     lines = [f"Clip from {src.creator}: {src.page_url}"]
     if campaign.caption_required:
         lines.append(campaign.caption_required)

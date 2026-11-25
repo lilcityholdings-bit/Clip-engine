@@ -226,3 +226,14 @@ python -m pytest                         # tests
 - **Stepping through waiting clips:** the "Do this next" card (clips to approve, and clips to post by hand) has
   **‹ Previous / 2 of 5 / Next ›** links when more than one clip is waiting (`/?n=2`). Approving, skipping or posting a
   clip returns to the first one.
+
+## Campaigns on the front page, deleting them, and clips with no campaign
+
+- The **Add a video** card now starts with **+ Add a campaign** and **Remove or edit campaigns** buttons (they jump to the
+  campaign form and list under More).
+- **Every campaign can be deleted**, including one set in the `CAMPAIGNS_JSON` Railway variable: it is hidden for good
+  (`removed-campaigns.json` on the volume) because the dashboard can't edit a Railway variable. Past clips stay.
+- **My own clips (no campaign)** is a built-in choice in the campaign list on the upload and link forms (`campaigns.OWN`,
+  never saved). Its clips have no paid-clip line or `#ad`, no paid-partnership advice, no link to submit, are not counted in
+  earnings and are deleted after posting (there is nothing to resubmit). Credit is added only if you type a creator's name.
+  It works even when no campaign exists. If you post paid or sponsored content, use a real campaign so the disclosure stays.

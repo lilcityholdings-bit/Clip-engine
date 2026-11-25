@@ -205,7 +205,6 @@ def _trending(conn) -> str:
 def _campaign_rows(settings: Settings) -> str:
     """One card per campaign (cards fit a phone screen better than a wide table)."""
     e = html.escape
-    locked = campaigns.env_ids()
     cards = []
     today = date.today()
     for c in campaigns.load(settings.data_dir):
@@ -216,9 +215,8 @@ def _campaign_rows(settings: Settings) -> str:
         actions = [f'<a class="button" href="/?edit={e(c.id)}#campaign-form">Edit</a>',
                    f'<form class="inline" method="post" action="/campaigns/toggle"><input type="hidden" name="id" '
                    f'value="{e(c.id)}"><button>{"Pause" if c.active else "Resume"}</button></form>']
-        if c.id not in locked:
-            actions.append(f'<form class="inline" method="post" action="/campaigns/delete" onsubmit="return '
-                           f'confirm(\'Delete this campaign? Its past clips stay.\')"><input type="hidden" '
+        actions.append(f'<form class="inline" method="post" action="/campaigns/delete" onsubmit="return '
+                           f'confirm(\'Delete this campaign? Its past clips stay. You can add it again later.\')"><input type="hidden" '
                            f'name="id" value="{e(c.id)}"><button>Delete</button></form>')
         cards.append(f'<div class="card"><div><b>{_link(c.program_url, c.name)}</b> &middot; {status}</div>'
                      f'<div class="muted">${c.rate_per_1k_views:,.2f} per 1,000 views &middot; '
@@ -489,8 +487,7 @@ def _todo(conn, settings: Settings) -> str:
         return ""  # still setting up: the Getting started list leads
     head = "".join(items) if items else '<span class="good">&#10003; Nothing needs you right now.</span>'
     shortcuts = ['<a href="#clips">Your clips</a>', '<a href="#campaigns">Campaigns</a>']
-    if campaigns.live(campaigns.load(settings.data_dir)):
-        shortcuts.append('<a href="#own-video">Add a video</a>')
+    shortcuts.append('<a href="#own-video">Add a video</a>')
     shortcuts.append('<a href="#settings">Settings</a>')
     return (f'<section id="todo"><div class="row">{head}</div>'
             f'<div class="muted" style="margin-top:8px;font-size:13px">Go to: {" &middot; ".join(shortcuts)}</div></section>')
@@ -537,9 +534,7 @@ def _status(conn) -> str:
 
 def _own_video(conn, settings: Settings) -> str:
     """Add a video: pick the campaign, the file(s) and how many clips; everything else is under More options."""
-    live = campaigns.live(campaigns.load(settings.data_dir))
-    if not live:
-        return ""
+    live = campaigns.live(campaigns.load(settings.data_dir)) + [campaigns.OWN]  # always: your own clips need no campaign
     e = html.escape
     options = "".join(f'<option value="{e(c.id)}">{e(c.name)}</option>' for c in live)
     waiting = manual.queue(conn)
@@ -548,6 +543,10 @@ def _own_video(conn, settings: Settings) -> str:
         queue_html = ('<div class="muted" style="margin:8px 0">Waiting to be clipped: '
                       + "; ".join(e(w.get("title") or (f"{len(w['files'])} files" if w.get("kind") == "project" else w["ref"][-40:]))
                                   for w in waiting) + '</div>')
+    manage = ('<div class="row" style="margin:6px 0"><a class="button" href="#campaign-form">+ Add a campaign</a>'
+              '<a class="button" href="#campaigns">Remove or edit campaigns</a></div>'
+              '<div class="muted">Pick <b>My own clips (no campaign)</b> for videos that aren\'t part of a campaign: '
+              'no paid-clip label, no link to submit.</div>')
     campaign = f'<label>Campaign</label><select name="campaign" style="width:100%;font:inherit;padding:9px">{options}</select>'
     count = ('<label>How many clips do you want? <small>(up to 4)</small></label>'
              '<select name="count" style="width:100%;font:inherit;padding:9px">'
@@ -566,7 +565,7 @@ def _own_video(conn, settings: Settings) -> str:
              '<label>Title <small>(optional; the post title when the campaign has no approved captions)</small></label>'
              '<input type="text" name="title">')
     return (
-        '<section id="own-video"><h2>Add a video</h2>' + queue_html +
+        '<section id="own-video"><h2>Add a video</h2>' + manage + queue_html +
         '<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">' + campaign +
         f'<label>Video or photos <small>(one video is cut into clips; several files are combined). On a phone, tap '
         f'Choose file, then <b>Files</b> or <b>Downloads</b> to pick something you downloaded.</small></label>'
@@ -1726,7 +1725,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
             self._redirect(back if SAFE_BACK_RE.match(back) else "/")
 
         def _live_campaign(self, campaign_id: str):
-            return campaigns.by_id(campaigns.live(campaigns.load(settings.data_dir))).get(campaign_id)
+            return campaigns.by_id(campaigns.live(campaigns.load(settings.data_dir)) + [campaigns.OWN]).get(campaign_id)
 
         def _add_video_link(self, conn) -> None:
             form = {k: v[0] for k, v in self._form().items()}
@@ -1837,7 +1836,7 @@ def make_handler(settings: Settings, throttle: LoginThrottle | None = None):
             if self.path == "/campaigns/toggle":
                 campaign.active = not campaign.active
                 campaigns.save(settings.data_dir, campaign)
-            elif self.path == "/campaigns/delete" and campaign.id not in campaigns.env_ids():
+            elif self.path == "/campaigns/delete":
                 campaigns.remove(settings.data_dir, campaign.id)
             else:
                 return self._send(404, b"not found", "text/plain")

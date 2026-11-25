@@ -179,7 +179,7 @@ def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
                 path = Path(item["ref"])
                 src = sources.Source(
                     identifier=f"upload:{path.stem}", title=item.get("title") or path.stem,
-                    creator=item.get("creator") or campaign.name, license_url=campaign.program_url,
+                    creator=item.get("creator") or ("" if campaign.personal else campaign.name), license_url=campaign.program_url,
                     video_url=str(path), duration=media.duration(path), page=campaign.program_url)
             else:
                 if (_seen(conn, item["ref"]) and not item.get("redo")) or policy.watermarked(item["ref"]):
@@ -217,7 +217,7 @@ def _build_project(item: dict, campaign: campaigns.Campaign, claude: anthropic.A
         budget = min(chosen[1], media.COMPILATION_MAX_SEC)
     else:
         budget = media.COMPILATION_MAX_SEC if item.get("length") == "60" else media.COMPILATION_DEFAULT_SEC
-    base = item.get("title") or campaign.name
+    base = item.get("title") or campaign.label or "My video"
     count = max(1, min(item.get("count", 1), len(files), manual.MAX_VIDEOS))
     out = files[0].parent / f"{stem}-combined.mp4"
     try:
@@ -237,7 +237,8 @@ def _build_project(item: dict, campaign: campaigns.Campaign, claude: anthropic.A
     finally:
         shutil.rmtree(work, ignore_errors=True)
     src = sources.Source(
-        identifier=f"upload:{stem}", title=base, creator=item.get("creator") or campaign.name,
+        identifier=f"upload:{stem}", title=base,
+        creator=item.get("creator") or ("" if campaign.personal else campaign.name),
         license_url=campaign.program_url, video_url=str(built), duration=media.duration(built),
         page=campaign.program_url)
     return src, windows, titles
@@ -272,7 +273,7 @@ def arrange_groups(claude: anthropic.Anthropic | None, files: list[Path], campai
             photo = manual.is_image(f)
             label = "photo" if photo else f"video, {media.duration(f):.0f} seconds"
             pieces.append((label, media.thumbnail(f, work / f"thumb{i}.jpg", photo)))
-        brief = "; ".join(x for x in (campaign.name, campaign.niche, campaign.rules, notes and f"owner's instructions: {notes}") if x)
+        brief = "; ".join(x for x in (campaign.label, campaign.niche, campaign.rules, notes and f"owner's instructions: {notes}") if x)
         result = ai.plan_videos(claude, pieces, brief, count)
         used: set[int] = set()
         groups: list[tuple[list[Path], str]] = []
@@ -305,7 +306,7 @@ def arrange(claude: anthropic.Anthropic, files: list[Path], campaign: campaigns.
             photo = manual.is_image(f)
             label = "photo" if photo else f"video, {media.duration(f):.0f} seconds"
             pieces.append((label, media.thumbnail(f, work / f"thumb{i}.jpg", photo)))
-        brief = "; ".join(x for x in (campaign.name, campaign.niche, campaign.rules, notes and f"owner's instructions: {notes}") if x)
+        brief = "; ".join(x for x in (campaign.label, campaign.niche, campaign.rules, notes and f"owner's instructions: {notes}") if x)
         result = ai.arrange_pieces(claude, pieces, brief)
         order = list(dict.fromkeys(i for i in result.get("order", []) if isinstance(i, int) and 0 <= i < len(files)))
         if not order:
@@ -338,7 +339,7 @@ def track_record(conn: sqlite3.Connection, n: int = 5, min_scored: int = 8) -> s
 
 
 def niche_of(campaign: campaigns.Campaign | None, arms: dict) -> str:
-    if campaign:
+    if campaign and not campaign.personal:
         return campaign.niche or campaign.name
     return arms.get("topic", "education")
 
@@ -681,13 +682,16 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
     live = campaigns.live(campaigns.load(settings.data_dir))
     library = media.music_library(settings.data_dir)
     tracks = sorted(library)
-    if live:
-        job = manual_job(conn, live, tracks, claude) or campaign_job(conn, live, tracks)
-    else:
-        job = archive_job(conn, claude, yt, tracks) if settings.archive_mode else None
+    # Your own videos (kept in the queue) are clipped even with no campaign: they use the built-in "My own clips".
+    job = manual_job(conn, live + [campaigns.OWN], tracks, claude)
+    if not job:
+        if live:
+            job = campaign_job(conn, live, tracks)
+        elif settings.archive_mode:
+            job = archive_job(conn, claude, yt, tracks)
     if not job:
         _note(conn, "No new video to clip. Upload one under Add your own video, or wait for the creator's next "
-                    "upload." if live else "Add a campaign first.")
+                    "upload." if live else "Add a campaign first, or upload a video as My own clips.")
         return 0
     asked = 0
     if job.item:
@@ -776,7 +780,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
                 try:
                     frames = [media.frame_at(video, work / f"cap{n}.jpg", (a + b) / 2) for n, (a, b) in enumerate(spans)]
                     captions = ai.caption_from_frames(
-                        claude, frames, "; ".join(x for x in (campaign.name, campaign.niche, campaign.rules) if x),
+                        claude, frames, "; ".join(x for x in (campaign.label, campaign.niche, campaign.rules) if x),
                         (job.item or {}).get("notes", "")) if frames else []
                 except Exception:
                     log.exception("could not caption %s from its pictures", src.identifier)
@@ -843,7 +847,7 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
             cur = conn.execute(
                 "INSERT INTO clips (source_identifier, campaign_id, start_sec, end_sec, title, description, tags,"
                 " arms, file_path, media_token, ai_score, hook_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (src.identifier, campaign.id if campaign else None, clip["start"], clip["end"], clip["title"],
+                (src.identifier, campaign.id if campaign and not campaign.personal else None, clip["start"], clip["end"], clip["title"],
                  description or compose_description(clip, job.footer), json.dumps(clip["tags"]), json.dumps(arms),
                  str(out), token, clip.get("score"), clip.get("hook_text", "")),
             )
