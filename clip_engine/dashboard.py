@@ -231,9 +231,24 @@ document.querySelectorAll('#own-video select[name=campaign]').forEach(function (
   try { var last = localStorage.getItem('campaign'); if (last && sel.querySelector('option[value="' + last + '"]')) sel.value = last; } catch (err) {}
   sel.addEventListener('change', function () { try { localStorage.setItem('campaign', sel.value); } catch (err) {} });
 });
+function sendLink(form, btn, link) {
+  const body = new URLSearchParams({campaign: form.campaign.value, url: link, creator: form.creator.value,
+                                    title: form.title.value, count: form.count.value, notes: form.notes.value,
+                                    caption: form.caption.value, seconds: form.seconds.value});
+  if (form.review.checked) { body.set('review', 'on'); }
+  const status = form.querySelector('.status');
+  btn.disabled = true; status.textContent = 'Adding the link...';
+  fetch('/manual-video/link', {method: 'POST', body: body}).then(function (r) {
+    if (r.redirected) { location.href = r.url; return; }
+    return r.text().then(function (t) { document.open(); document.write(t); document.close(); });
+  }).catch(function () { status.textContent = 'Could not add the link. Try again.'; btn.disabled = false; });
+  return false;
+}
 function sendVideo(form, btn) {
   const files = Array.from(form.file.files);
-  if (!files.length) { alert('Choose at least one file first.'); return false; }
+  const link = form.url ? form.url.value.trim() : '';
+  if (!files.length && link) { return sendLink(form, btn, link); }
+  if (!files.length) { alert('Choose a file, or paste a video link.'); return false; }
   const bad = files.find(f => !/\\.(mp4|mov|mkv|webm|m4v|jpe?g|png|webp)$/i.test(f.name));
   if (bad) { alert(bad.name + ' is not a video or photo this can use. Use mp4, mov, mkv, webm, m4v, jpg, png or webp.'); return false; }
   const combine = form.mode.value === 'combine';
@@ -569,7 +584,10 @@ def _own_video(conn, settings: Settings) -> str:
         '<form onsubmit="return sendVideo(this, this.querySelector(\'button\'))">' + campaign +
         f'<label>Video or photos <small>(one video is cut into clips; several files are combined). On a phone, tap '
         f'Choose file, then <b>Files</b> or <b>Downloads</b> to pick something you downloaded.</small></label>'
-        f'<input type="file" name="file" multiple>' + count + seconds + notes + caption +
+        f'<input type="file" name="file" multiple>'
+        '<label>Or paste a video link <small>(YouTube, Google Drive, Vimeo or a direct link. TikTok, Instagram and '
+        'Facebook links are refused because their videos carry a watermark: use the original file for those)</small></label>'
+        '<input type="url" name="url" placeholder="https://" inputmode="url">' + count + seconds + notes + caption +
         '<details style="margin-top:10px"><summary>More options</summary>' + names +
         '<div class="checks" style="flex-direction:column;align-items:flex-start;margin-top:8px"><b>With several files:</b>'
         '<label><input type="radio" name="mode" value="combine" checked> <b>Combine</b> them into new videos, in a smart '
@@ -579,11 +597,7 @@ def _own_video(conn, settings: Settings) -> str:
         '<select name="length" style="width:100%;font:inherit;padding:9px"><option value="30">15 to 30 seconds (best)</option>'
         '<option value="60">Up to 60 seconds</option></select>' + review + '</details>'
         '<div class="muted status" style="margin:6px 0"></div>'
-        '<button class="primary" type="submit" style="margin-top:8px">Upload</button></form>'
-        '<details style="margin-top:12px"><summary>Paste a link instead</summary>'
-        '<form method="post" action="/manual-video/link">' + campaign +
-        '<label>Video link</label><input type="url" name="url" placeholder="https://">' + count + seconds + notes + caption + review + names +
-        '<button class="primary" style="margin-top:10px">Add video</button></form></details>'
+        '<button class="primary" type="submit" style="margin-top:8px">Upload or add link</button></form>'
         + UPLOAD_JS + '</section>')
 
 

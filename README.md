@@ -237,3 +237,7 @@ python -m pytest                         # tests
   never saved). Its clips have no paid-clip line or `#ad`, no paid-partnership advice, no link to submit, are not counted in
   earnings and are deleted after posting (there is nothing to resubmit). Credit is added only if you type a creator's name.
   It works even when no campaign exists. If you post paid or sponsored content, use a real campaign so the disclosure stays.
+- **Link box next to the file chooser:** the Add a video form has **Or paste a video link** right under **Choose file**
+  (one button, **Upload or add link**: a file wins if both are filled). The separate "Paste a link instead" form is gone.
+  YouTube, Google Drive, Vimeo and direct links are accepted; TikTok, Instagram and Facebook links are refused on purpose
+  (their videos carry a watermark, which campaigns and the platforms penalise). YouTube may block the server's download.

@@ -1604,7 +1604,7 @@ def test_the_main_page_is_short_upload_then_clips_then_links(server, tmp_path):
     form = page.split('id="own-video"')[1].split("</section>")[0]
     visible = form.split("<details")[0]  # what shows before More options is opened
     assert "Campaign" in visible and 'type="file"' in visible and "How many clips do you want?" in visible
-    assert "Upload</button>" in form.split("</details>")[1]  # the Upload button is outside More options
+    assert "Upload or add link</button>" in form.split("</details>")[1]  # the button is outside More options
     assert "Creator" not in visible and "Combine" not in visible  # tucked under More options
     assert "More options" in form
 
@@ -1889,3 +1889,12 @@ def test_my_own_clips_cannot_be_edited_paused_or_deleted(server, tmp_path):
         with pytest.raises(urllib.error.HTTPError):
             _get(base + path, "s3cret", data=b"id=_own")
     assert not (tmp_path / "campaigns.json").exists() or "_own" not in (tmp_path / "campaigns.json").read_text()
+
+
+def test_the_add_a_video_form_has_a_link_box_next_to_the_file_chooser(server, tmp_path):
+    base, _ = server
+    _campaign(tmp_path)
+    page = _get(base + "/", "s3cret").read().decode()
+    form = page.split('<section id="own-video">')[1].split("</section>")[0]
+    assert form.index('type="file"') < form.index('name="url"') and "Or paste a video link" in form
+    assert "sendLink(form, btn, link)" in form and "Paste a link instead" not in form
