@@ -190,6 +190,9 @@ def manual_job(conn: sqlite3.Connection, live: list[campaigns.Campaign],
                     src.creator = item["creator"]
         except Exception:
             log.exception("could not read the video you added: %s", item)
+            if item["kind"] == "url":
+                _note(conn, f"Could not read the link {item['ref'][:80]}. YouTube often blocks the server; download the "
+                            "video to your phone and upload the file instead.")
             manual.discard(item)
             continue
         formats = [f for f in campaign.formats if f in strategy.FORMATS] or ["short"]
@@ -726,10 +729,22 @@ def produce(conn: sqlite3.Connection, settings: Settings, claude: anthropic.Anth
     try:
         if src.identifier.startswith("upload:"):
             video = Path(src.video_url)  # a file you uploaded: already on the disk
-        elif campaign:
-            video = campaigns.download(src.video_url, work / "source.mp4")
         else:
-            video = media.download(src.video_url, work / "source.mp4")
+            try:
+                if campaign:
+                    video = campaigns.download(src.video_url, work / "source.mp4")
+                else:
+                    video = media.download(src.video_url, work / "source.mp4")
+            except Exception:
+                if not (job.item and job.item.get("kind") == "url"):
+                    raise
+                log.exception("could not download the link you added: %s", src.video_url)
+                _note(conn, f"Could not download {src.video_url[:80]}. YouTube often blocks the server; download the "
+                            "video to your phone and upload the file instead.")
+                conn.execute("DELETE FROM sources WHERE identifier = ?", (src.identifier,))  # so the link can be tried again
+                conn.commit()
+                finished = True
+                return 0
         # Go straight to the most replayed parts when YouTube has that data.
         windows = moments.windows(src.heatmap, src.duration)
         segments, words = [], []

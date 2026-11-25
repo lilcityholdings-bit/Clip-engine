@@ -1898,3 +1898,19 @@ def test_the_add_a_video_form_has_a_link_box_next_to_the_file_chooser(server, tm
     form = page.split('<section id="own-video">')[1].split("</section>")[0]
     assert form.index('type="file"') < form.index('name="url"') and "Or paste a video link" in form
     assert "sendLink(form, btn, link)" in form and "Paste a link instead" not in form
+
+
+def test_a_link_that_cannot_be_downloaded_says_so_and_can_be_tried_again(tmp_path, monkeypatch):
+    from clip_engine.config import Settings
+    from tests.test_core import FakePub
+
+    conn, claude = _produce_fixture(tmp_path, monkeypatch, {}, ["unused"])
+    manual.pop(conn)
+    manual.add(conn, {"kind": "url", "ref": "https://youtu.be/abc123", "campaign_id": "pod", "creator": "", "count": 1})
+    monkeypatch.setattr(campaigns, "describe", lambda c, u: pipeline.sources.Source(
+        u, "Some video", "Someone", c.program_url, u, 600, page=u))
+    monkeypatch.setattr(campaigns, "download", lambda *a: (_ for _ in ()).throw(RuntimeError("Sign in to confirm you're not a bot")))
+    pubs = {"youtube": FakePub("youtube"), "tiktok": FakePub("tiktok")}
+    assert pipeline.produce(conn, Settings(data_dir=tmp_path), claude, None, pubs, 2) == 0
+    assert "upload the file instead" in db.get(conn, "produce_note")
+    assert conn.execute("SELECT COUNT(*) FROM sources WHERE identifier = ?", ("https://youtu.be/abc123",)).fetchone()[0] == 0
