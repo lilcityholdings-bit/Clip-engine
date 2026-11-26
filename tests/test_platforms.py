@@ -153,7 +153,9 @@ def test_dashboard_requires_password_and_escapes(server):
     with pytest.raises(urllib.error.HTTPError):
         _get(base + "/", "wrong")
     page = _get(base + "/", "s3cret").read().decode()
-    assert "Clip Engine" in page and "&lt;script&gt;alert(1)&lt;/script&gt;" in page and "<script>alert(1)" not in page
+    assert "Clip Engine" in page and "<script>alert(1)" not in page
+    shown = _get(base + "/status", "s3cret").read().decode()  # a clip's title is escaped where it is listed
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in shown and "<script>alert(1)" not in shown
 
 
 def test_media_is_public_but_only_by_token(server):

@@ -121,9 +121,19 @@ summary {{ cursor:pointer; font-weight:600; color:var(--accent); }} form.inline 
 video {{ width:100%; max-width:280px; aspect-ratio:9/16; object-fit:contain; border-radius:10px; background:#000; display:block; margin:8px 0; }}
 .desc {{ white-space:pre-wrap; font-size:13px; color:var(--muted); }}
 a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1px solid var(--line); text-decoration:none; }}
+.tab {{ display:block; }} body.js .tab {{ display:none; }} body.js .tab.on {{ display:block; }}
+main {{ padding-bottom:84px; }}
+#tabs {{ position:fixed; left:0; right:0; bottom:0; display:flex; background:var(--card); border-top:1px solid var(--line);
+  padding-bottom:env(safe-area-inset-bottom); z-index:5; }}
+#tabs a {{ flex:1; text-align:center; padding:10px 2px 8px; text-decoration:none; color:var(--muted); font-size:12px; position:relative; }}
+#tabs a b {{ display:block; font-size:20px; line-height:1.2; }}
+#tabs a.on {{ color:var(--accent); font-weight:700; }}
+#tabs i {{ position:absolute; top:4px; left:58%; background:var(--bad); color:#fff; border-radius:10px; font-style:normal;
+  font-size:11px; font-weight:700; padding:0 6px; line-height:17px; }}
 </style></head><body><main>
 <h1>Clip Engine <span class="{state_class}">&middot; {state}</span></h1>
 {banner}
+<div class="tab on" id="tab-home">
 {next}
 {todo}
 {start}
@@ -132,15 +142,24 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 <form method="post" action="/run"><button>Make clips now</button></form>
 <a class="button" href="/status">Clip status</a>
 </div>{status}</section>
+</div>
+<div class="tab" id="tab-add">
 {own_video}
+</div>
+<div class="tab" id="tab-clips">
 {library}
-<section id="links"><h2>Links to submit</h2>{pending}</section>
-<details id="more" style="margin-top:12px"><summary>More: campaigns, lists by step, earnings, trends and settings</summary>
-<section id="campaigns"><h2>Campaigns</h2>{campaigns}{campaign_form}</section>
+<details id="lists" style="margin-top:12px"><summary>Lists by step: approval, ready to post, scheduled, post again</summary>
 {review}
 {ready}
 {scheduled}
 {repost}
+</details>
+</div>
+<div class="tab" id="tab-links">
+<section id="links"><h2>Links to submit</h2>{pending}</section>
+</div>
+<div class="tab" id="tab-more">
+<section id="campaigns"><h2>Campaigns</h2>{campaigns}{campaign_form}</section>
 <section><div class="row">
 <div class="stat"><b>${earned}</b><span>estimated earnings</span></div>
 <div class="stat"><b>{views}</b><span>total views</span></div>
@@ -150,15 +169,43 @@ a.button {{ display:inline-block; padding:8px 14px; border-radius:8px; border:1p
 <section><h2>Earnings by campaign</h2>{earnings}</section>
 <section><h2>Trending now</h2>{trending}</section>
 <section><h2>What's working (higher score = more views and earnings)</h2>{strategy}</section>
-<section><h2>Recent clips</h2>{clips}</section>
 <section><h2>Recent problems</h2>{errors}</section>
 <section id="settings"><h2>Settings</h2>{settings_html}</section>
-</details>
+</div>
+<nav id="tabs">
+<a href="#tab-home" data-tab="home"><b>&#127968;</b>Home</a>
+<a href="#tab-add" data-tab="add"><b>&#10133;</b>Add</a>
+<a href="#tab-clips" data-tab="clips"><b>&#127916;</b>Clips{nav_clips}</a>
+<a href="#tab-links" data-tab="links"><b>&#128279;</b>Links{nav_links}</a>
+<a href="#tab-more" data-tab="more"><b>&#9776;</b>More</a>
+</nav>
 <script>
-// A link to a section inside the closed More box opens the box first, so the page can jump there.
-function openFor(hash) {{ var t = hash && document.querySelector(hash); var d = t && t.closest('details'); if (d) d.open = true; }}
-document.querySelectorAll('a[href^="#"]').forEach(function (a) {{ a.addEventListener('click', function () {{ openFor(a.getAttribute('href')); }}); }});
-openFor(location.hash);
+// One section at a time. A link to something inside another section (or a closed box) switches to it first.
+(function () {{
+  document.body.classList.add('js');
+  var tabs = document.querySelectorAll('.tab'), links = document.querySelectorAll('#tabs a');
+  function show(name) {{
+    tabs.forEach(function (t) {{ t.classList.toggle('on', t.id === 'tab-' + name); }});
+    links.forEach(function (a) {{ a.classList.toggle('on', a.getAttribute('data-tab') === name); }});
+  }}
+  function openFor(hash) {{
+    if (!hash || hash.length < 2) {{ show('home'); return; }}
+    if (hash.indexOf('#tab-') === 0) {{ show(hash.slice(5)); return; }}
+    var t = document.querySelector(hash);
+    if (!t) {{ show('home'); return; }}
+    var d = t.closest('details'); if (d) d.open = true;
+    var tab = t.closest('.tab'); show(tab ? tab.id.slice(4) : 'home');
+    t.scrollIntoView();
+  }}
+  links.forEach(function (a) {{ a.addEventListener('click', function (ev) {{
+    ev.preventDefault(); show(a.getAttribute('data-tab')); history.replaceState(null, '', a.getAttribute('href')); window.scrollTo(0, 0);
+  }}); }});
+  document.querySelectorAll('a[href^="#"]').forEach(function (a) {{
+    if (a.closest('#tabs')) return;
+    a.addEventListener('click', function () {{ openFor(a.getAttribute('href')); }});
+  }});
+  openFor(location.hash);
+}})();
 </script>
 </main></body></html>"""
 
@@ -289,7 +336,7 @@ REFRESH_JS = """<script>
 setInterval(function () {
   var el = document.activeElement, busy = el && ['INPUT', 'TEXTAREA', 'SELECT'].indexOf(el.tagName) >= 0;
   var playing = Array.prototype.some.call(document.querySelectorAll('video'), function (v) { return !v.paused; });
-  if (!busy && !playing && !window.uploading) location.replace(location.pathname + location.search);
+  if (!busy && !playing && !window.uploading) location.replace(location.pathname + location.search + location.hash);
 }, 20000);
 </script>"""
 
@@ -478,6 +525,10 @@ def _next_task(conn, settings: Settings, pick: int = 0) -> str:
                 f'<a class="button primary" {BIG} href="#own-video">Add a video</a>')
 
 
+def _badge(n: int) -> str:
+    return f"<i>{n}</i>" if n else ""
+
+
 def _todo(conn, settings: Settings) -> str:
     """The top of the page: what needs you right now, each item a link to its section, then shortcuts."""
     review = len(pipeline.awaiting_review(conn))
@@ -501,11 +552,7 @@ def _todo(conn, settings: Settings) -> str:
     if not items and not has_campaign:
         return ""  # still setting up: the Getting started list leads
     head = "".join(items) if items else '<span class="good">&#10003; Nothing needs you right now.</span>'
-    shortcuts = ['<a href="#clips">Your clips</a>', '<a href="#campaigns">Campaigns</a>']
-    shortcuts.append('<a href="#own-video">Add a video</a>')
-    shortcuts.append('<a href="#settings">Settings</a>')
-    return (f'<section id="todo"><div class="row">{head}</div>'
-            f'<div class="muted" style="margin-top:8px;font-size:13px">Go to: {" &middot; ".join(shortcuts)}</div></section>')
+    return f'<section id="todo"><div class="row">{head}</div></section>'
 
 
 def start_now(conn, settings: Settings, first: str) -> str:
@@ -1324,6 +1371,8 @@ def render(conn, settings: Settings, notice: str = "", error: str = "", form_val
                                      open_form=bool(form_values) or not campaigns.load(settings.data_dir)),
         status=_status(conn),
         todo=_todo(conn, settings),
+        nav_clips=_badge(len(pipeline.awaiting_review(conn)) + sum(len(c['posts']) for c in pipeline.ready_to_post(conn))),
+        nav_links=_badge(len(pending)),
         next=_next_task(conn, settings, pick),
         state="paused" if paused else "running", state_class="bad" if paused else "good",
         earned=f"{sum(r['estimated_usd'] for r in earn):,.2f}", views=f"{totals['views']:,}",

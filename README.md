@@ -241,3 +241,12 @@ python -m pytest                         # tests
   (one button, **Upload or add link**: a file wins if both are filled). The separate "Paste a link instead" form is gone.
   YouTube, Google Drive, Vimeo and direct links are accepted; TikTok, Instagram and Facebook links are refused on purpose
   (their videos carry a watermark, which campaigns and the platforms penalise). YouTube may block the server's download.
+
+## Layout: five tabs at the bottom of the phone screen
+
+The dashboard shows one section at a time, with a bar at the bottom: **Home** (the Do this next card, what needs you, Pause and Make
+clips now), **Add** (Add a video: file or link, campaign, length, instructions), **Clips** (your clips; the by-step lists are folded
+under *Lists by step*), **Links** (links to submit) and **More** (campaigns, earnings, trends, what's working, problems, settings).
+Red numbers on Clips and Links count what needs you. A link to a section in another tab switches to it first (`/#settings`,
+`/?edit=ID#campaign-form`). Removed as duplicates: the "Go to" shortcut row (the tabs replace it) and the Recent clips table (Clip status
+lists every clip). Without JavaScript every section shows in one long page.

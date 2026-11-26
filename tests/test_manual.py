@@ -1452,15 +1452,31 @@ def test_checklist_follows_the_campaign_rules_and_shows_before_posting(server, t
     assert "Before you post" in _get(f"{base}/clip/{cid}", "s3cret").read().decode()
 
 
-def test_phone_layout_puts_everyday_things_first_and_the_rest_under_more(server, tmp_path):
+def test_phone_layout_has_five_tabs_with_the_everyday_things_first(server, tmp_path):
     base, conn = server
     _campaign(tmp_path)
     page = _get(base + "/", "s3cret").read().decode()
-    more = page.index('<details id="more"')
-    assert page.index("Make clips now") < page.index('id="own-video"') < page.index('id="links"') < more
-    for folded in ('id="campaigns"', 'id="settings"', "Trending now", "estimated earnings"):
-        assert page.index(folded) > more, folded
-    assert "openFor(location.hash)" in page  # the Settings shortcut opens the More box
+    order = [page.index(f'id="tab-{t}"') for t in ("home", "add", "clips", "links", "more")]
+    assert order == sorted(order)
+    assert page.index("Make clips now") < page.index('id="tab-add"') < page.index('id="own-video"') < page.index('id="tab-clips"')
+    for tab, inside in (("more", 'id="campaigns"'), ("more", 'id="settings"'), ("more", "Trending now"),
+                        ("add", 'id="own-video"'), ("links", 'id="links"')):
+        assert page.index(inside) > page.index(f'id="tab-{tab}"'), inside
+    nav = page.split('<nav id="tabs">')[1]
+    assert all(f'data-tab="{t}"' in nav for t in ("home", "add", "clips", "links", "more"))
+    assert "openFor(location.hash)" in page  # a link to a section in another tab switches to it first
+    assert "Recent clips" not in page  # the Clip status page already lists every clip
+
+
+def test_tab_badges_count_what_needs_you(server, tmp_path):
+    base, conn = server
+    _campaign(tmp_path)
+    assert "<i>" not in _get(base + "/", "s3cret").read().decode().split('<nav id="tabs">')[1]
+    cid, _ = _posted_clip(conn, tmp_path, platforms=("tiktok",))
+    conn.execute("UPDATE posts SET status = 'review', url = NULL WHERE clip_id = ?", (cid,))
+    conn.commit()
+    nav = _get(base + "/", "s3cret").read().decode().split('<nav id="tabs">')[1]
+    assert "Clips<i>1</i>" in nav
 
 
 def test_campaign_form_takes_the_submit_window_and_keep_days():
